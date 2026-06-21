@@ -174,8 +174,8 @@ fn help_text() -> String {
            Fixed in firmware; the VN-100 has no command to query them, and rejects\n  \
            out-of-range values with a $VNERR response.\n\
          Valid BAUD: {VALID_BAUDS:?}\n\n\
-         Note: a baud change is volatile until persisted, and closing/reopening the\n  \
-           port can reset the device back to its flash baud. So persist it:\n    \
+         Note: a baud change is volatile — the device keeps it across host reconnects,\n  \
+           but a power cycle or reset reverts to the flash baud. Persist to keep it:\n    \
              rdwr_vn100 baud 921600 --persist        # change + verify + save to flash\n    \
              rdwr_vn100 --baud 921600 get            # device now boots at 921600\n\n\
          Examples:\n  \
@@ -344,12 +344,19 @@ where
         for &b in &buf[..n] {
             match b {
                 b'\n' => {
-                    let candidate = String::from_utf8_lossy(&line);
-                    let candidate = candidate.trim();
-                    if matches(candidate) {
-                        return Ok(Some(candidate.to_string()));
-                    }
+                    let raw = String::from_utf8_lossy(&line);
+                    // An ASCII reply ($VN...*XX) can arrive with leading bytes on
+                    // the same line — e.g. binary frames still streaming when the
+                    // echo lands. The reply starts at the last '$', so slice there
+                    // before matching/validating.
+                    let candidate: String = match raw.rfind('$') {
+                        Some(p) => raw[p..].trim().to_string(),
+                        None => raw.trim().to_string(),
+                    };
                     line.clear();
+                    if matches(&candidate) {
+                        return Ok(Some(candidate));
+                    }
                 }
                 b'\r' => {}
                 _ => {
@@ -548,6 +555,7 @@ fn measure_binary<S: Read>(port: &mut S, secs: u64) -> std::io::Result<BenchResu
 /// measure the achieved frame rate for `secs`, then restore the prior state.
 fn run_bench<S: Read + Write>(
     port: &mut S,
+    baud: u32,
     hz: u32,
     secs: u64,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -610,10 +618,14 @@ fn run_bench<S: Read + Write>(
     if let Some((t, ax, ay, az)) = sample {
         println!("Sample frame: t={t} ns, accel = [{ax:.3}, {ay:.3}, {az:.3}] m/s^2");
     }
-    let throughput = rate * BENCH_FRAME_LEN as f64 * 10.0; // ~10 bits/byte on the wire
+    // ~10 bits/byte on the wire (8N1); baud == bits/s for UART.
+    let bits_per_sec = rate * BENCH_FRAME_LEN as f64 * 10.0;
+    let pct = 100.0 * bits_per_sec / baud as f64;
     println!(
-        "Wire throughput ~{:.0} kbit/s of the 1152 kbit/s the 115200 link provides.",
-        throughput / 1000.0
+        "Wire throughput ~{:.0} kbit/s = {:.0}% of the {:.1} kbit/s {baud}-baud link.",
+        bits_per_sec / 1000.0,
+        pct,
+        baud as f64 / 1000.0
     );
 
     // Restore: turn the binary output off, put the ASCII rate back.
@@ -733,8 +745,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             // Give the device a moment to reconfigure its UART before we talk at
             // the new rate (the vendor SDK waits ~50 ms here), then switch THIS
-            // connection — without closing the port, since closing/reopening can
-            // reset the device back to its flash baud.
+            // connection in place. We switch in-session rather than close/reopen
+            // not because the device would forget the baud — it holds the RAM
+            // value across host reconnects — but because each reconnect risks a
+            // line transient that, at very high baud (e.g. 921600 on an FT232R),
+            // can wedge the link until a power cycle.
             std::thread::sleep(Duration::from_millis(60));
             port.set_baud_rate(new_baud)?;
             // Drop any bytes that were in flight across the switch.
@@ -746,7 +761,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 &build_command("VNRRG,07"),
                 5,
                 |l| parse_reg07(l).is_some(),
-                "device did not respond at the new baud (a power cycle reverts it to 115200)",
+                "device did not respond at the new baud (a power cycle reverts to the flash baud)",
             )?;
             println!("RX: {verify}");
             println!(
@@ -766,7 +781,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("Baud saved to flash; the device will boot at {new_baud} from now on.");
             } else {
                 println!(
-                    "(Volatile — a power cycle or port reset reverts to flash. \
+                    "(Volatile — the device holds this across host reconnects, but a \
+                     power cycle or `reset`/`factory-reset` reverts it to the flash baud. \
                      Re-run with `baud {new_baud} --persist` to make it permanent.)"
                 );
             }
@@ -780,7 +796,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         Command::Bench { hz, secs } => {
-            run_bench(&mut port, hz, secs)?;
+            run_bench(&mut port, config.baud, hz, secs)?;
         }
 
         Command::FactoryReset => {
@@ -979,6 +995,18 @@ mod tests {
                 persist: true
             }
         ));
+    }
+
+    #[test]
+    fn read_reply_recovers_reply_after_binary_junk() {
+        // Binary bytes (no newline) immediately precede the ASCII echo, as when
+        // the binary stream is still flowing during the disable-binary command.
+        let mut data = vec![0xFA, 0x01, 0x10, 0x99, 0x00];
+        data.extend_from_slice(b"$VNWRG,75,0,4,01,0101*71\r\n");
+        let mut cursor = std::io::Cursor::new(data);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let got = read_reply(&mut cursor, deadline, |l| l.starts_with("$VNWRG,75")).unwrap();
+        assert_eq!(got.as_deref(), Some("$VNWRG,75,0,4,01,0101*71"));
     }
 
     #[test]

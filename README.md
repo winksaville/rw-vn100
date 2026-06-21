@@ -108,16 +108,120 @@ pick exactly the fields you need** (timestamp + accel), so 200 Hz fits trivially
 at 115200. The compact 200 Hz binary stream uses **less bandwidth than the
 default 40 Hz ASCII** does today.
 
-### 4. The 921600 detour was a dead end on this hardware
-The USB adapter is an **FTDI FT232R**, which supports 921600 fine. But:
+### 4. The 921600 detour was a dead end on this hardware — but *only* at 921600
+The USB adapter is an **FTDI FT232R**, which supports 921600 fine. Yet:
 - A **volatile** baud change (no `--persist`) that switched in-process *verified*
-  at 921600 — yet once the port closed and a fresh process reopened, the device's
+  at 921600 — but once the port closed and a fresh process reopened, the device's
   UART ended up **wedged and silent at every baud**, needing a **power cycle**.
   (Independently reproduced with pyserial, so it wasn't this tool's bug.)
-- Lesson: don't rely on volatile high-baud changes across process boundaries.
-  If you truly need 921600, **persist it** so the device *boots* there — or do it
-  inside one managed session (the vendor SDK's `changeBaudRate` handles the
-  reopen). For our goal, none of that was necessary.
+- **This is specific to the high baud, not to "volatile" itself.** A volatile
+  change to **57600** holds perfectly across *repeated* fresh-process reconnects —
+  the device keeps its RAM baud across host port closes; it only reverts on a
+  power cycle or a `reset`/`factory-reset`. So 921600 isn't *reverting* on
+  reconnect, it's the reconnect transient (DTR toggle / glitch) **corrupting the
+  link** at a baud where timing margin is ~16× tighter.
+- Lesson: lower/standard bauds reconnect reliably; treat ~921600 on this
+  cable/adapter as fragile. If you ever truly need it, **persist it** so the
+  device *boots* there (no reconnect-at-speed), or do it inside one managed
+  session (the SDK's `changeBaudRate`). For our 200 Hz goal, none of this matters —
+  binary-at-115200 wins on speed *and* robustness.
+
+**Summary — 921600 is intermittent, and idle time matters.** It is *not* a clean
+"always fails": 921600 sometimes reconnects fine on back-to-back runs (e.g.
+`sleep 1` between them). But a **long idle gap between runs reliably fails** —
+with `sleep 10` it wedged every time (3/3 attempts), while the immediately-prior
+`get` in the same sequence succeeded. So the high-baud failure is *probabilistic*
+and appears *time-dependent* (quick reconnects can survive; long-idle ones don't),
+and once it wedges, only a power cycle recovers it. An intermittent,
+unrecoverable failure that passes quick testing is the worst kind for flight, so
+the conclusion stands: **stay at 115200** (zero observed glitches; binary already
+gives 200 Hz there).
+
+Here's an example: three consecutive `rdwr_vn100` runs — 115200 (baseline), then
+921600 with a 1 s idle between gets, then 921600 with a 10 s idle. What changes
+between the two 921600 runs is the **idle, not the baud**. Each run starts from
+115200 (a power cycle reverts the volatile baud to the flash default).
+
+
+Here we use 115200:
+```
+wink@3900x 26-06-21T16:47:23.024Z:~/data/prgs/nps-gnc/rdwr_vn100 (main+1)
+$ rdwr_vn100 baud 115200; rdwr_vn100 --baud 115200 get; sleep 3; rdwr_vn100 --baud 115200 get;
+Opening /dev/ttyUSB0 at 115200 baud...
+TX: $VNWRG,05,115200*58
+RX: $VNWRG,05,115200*58
+Device acknowledged baud change to 115200.
+Verifying at 115200 baud...
+TX: $VNRRG,07*74
+RX: $VNRRG,07,40*5C
+Verified — device is at 115200 baud (async rate 40 Hz).
+(Volatile — a power cycle or port reset reverts to flash. Re-run with `baud 115200 --persist` to make it permanent.)
+Opening /dev/ttyUSB0 at 115200 baud...
+TX: $VNRRG,07*74
+RX: $VNRRG,07,40*5C
+Async output rate: 40 Hz
+Opening /dev/ttyUSB0 at 115200 baud...
+TX: $VNRRG,07*74
+RX: $VNRRG,07,40*5C
+Async output rate: 40 Hz
+wink@3900x 26-06-21T16:48:12.480Z:~/data/prgs/nps-gnc/rdwr_vn100 (main+1)
+```
+
+Here is 921600 with a sleep 1 between the 2nd and 3rd runs, works fine:
+```
+wink@3900x 26-06-21T16:48:12.480Z:~/data/prgs/nps-gnc/rdwr_vn100 (main+1)
+$ rdwr_vn100 --baud 115200 baud 921600; rdwr_vn100 --baud 921600 get; sleep 1; rdwr_vn100 --baud 921600 get;
+Opening /dev/ttyUSB0 at 115200 baud...
+TX: $VNWRG,05,921600*53
+RX: $VNWRG,05,921600*53
+Device acknowledged baud change to 921600.
+Verifying at 921600 baud...
+TX: $VNRRG,07*74
+RX: $VNRRG,07,40*5C
+Verified — device is at 921600 baud (async rate 40 Hz).
+(Volatile — a power cycle or port reset reverts to flash. Re-run with `baud 921600 --persist` to make it permanent.)
+Opening /dev/ttyUSB0 at 921600 baud...
+TX: $VNRRG,07*74
+RX: $VNRRG,07,40*5C
+Async output rate: 40 Hz
+Opening /dev/ttyUSB0 at 921600 baud...
+TX: $VNRRG,07*74
+RX: $VNRRG,07,40*5C
+Async output rate: 40 Hz
+wink@3900x 26-06-21T16:48:39.584Z:~/data/prgs/nps-gnc/rdwr_vn100 (main+1)
+```
+
+Power-cycled (back to 115200), then changed to 921600 again — but now with a
+`sleep 10` between the gets. This fails: tried it 3 times, never worked.
+```
+wink@3900x 26-06-21T16:48:39.584Z:~/data/prgs/nps-gnc/rdwr_vn100 (main+1)
+$ rdwr_vn100 --baud 115200 baud 921600; rdwr_vn100 --baud 921600 get; sleep 10; rdwr_vn100 --baud 921600 get;
+Opening /dev/ttyUSB0 at 115200 baud...
+TX: $VNWRG,05,921600*53
+RX: $VNWRG,05,921600*53
+Device acknowledged baud change to 921600.
+Verifying at 921600 baud...
+TX: $VNRRG,07*74
+RX: $VNRRG,07,40*5C
+Verified — device is at 921600 baud (async rate 40 Hz).
+(Volatile — a power cycle or port reset reverts to flash. Re-run with `baud 921600 --persist` to make it permanent.)
+Opening /dev/ttyUSB0 at 921600 baud...
+TX: $VNRRG,07*74
+RX: $VNRRG,07,40*5C
+Async output rate: 40 Hz
+Opening /dev/ttyUSB0 at 921600 baud...
+TX: $VNRRG,07*74
+  attempt 1/5: no response yet, retrying...
+TX: $VNRRG,07*74
+  attempt 2/5: no response yet, retrying...
+TX: $VNRRG,07*74
+  attempt 3/5: no response yet, retrying...
+TX: $VNRRG,07*74
+  attempt 4/5: no response yet, retrying...
+TX: $VNRRG,07*74
+Error: "no usable reply from device — is it actually at 921600 baud? (VN-100 factory default is 115200; use --baud to match, or the `baud` command to change it) (after 5 attempts; last: no reply yet)"
+wink@3900x 26-06-21T16:53:45.802Z:~/data/prgs/nps-gnc/rdwr_vn100 (main+1)
+```
 
 ### 5. Talking to a streaming device needs a robust reader
 Real serial I/O bites you in small ways we hit and fixed:
