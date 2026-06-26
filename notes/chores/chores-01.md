@@ -174,7 +174,7 @@ key. Three verbs, three distinct jobs:
 
 ## refactor: split main.rs into lib modules
 
-Commits:
+Commits: [[7]]
 
 `main.rs` had grown to ~1890 lines, and the 0.3.0 bench redesign
 adds a large new surface (the `get-*`/`set-*` verbs, the `+`-step
@@ -370,4 +370,5 @@ The fix reorders `bench_binary`:
 [4]: https://github.com/winksaville/rdwr_vn100/commit/17d25b209c0c "17d25b209c0ca61aea3a8f84041bc7002226e78f"
 [5]: https://github.com/winksaville/rdwr_vn100/commit/49e72e583d47 "49e72e583d4787fb567357965081983d3ee9e60b"
 [6]: https://github.com/winksaville/rdwr_vn100/commit/ec6c523d4991 "ec6c523d499125093f5e9a3daac60e145dffaf40"
+[7]: https://github.com/winksaville/rdwr_vn100/commit/cb3c720fefdf "cb3c720fefdf078c21475698c0675117588e988a"
 

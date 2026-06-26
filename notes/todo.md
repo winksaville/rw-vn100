@@ -36,9 +36,9 @@ Design + module layout in chores-01 [[5]].
      register parsers, `Field`/`FIELDS`) to `proto.rs`. (done)
    - 0.3.0-2 refactor: move port I/O (`read_reply`, `transact`,
      `transact_retry`, `send_reboot_command`) to `transact.rs`.
-     (current)
+     (done)
    - 0.3.0-3 refactor: move arg parsing, the `Command` enum, and
-     help text to `cli.rs`; scaffold `bench.rs`.
+     help text to `cli.rs`; scaffold `bench.rs`. (current)
    - 0.3.0-4 passive bench: `bench [SECS]` measures the live
      stream only — drop the configure/measure/restore code;
      ASCII line-count + binary frame rate via a `0xFA` sniff
