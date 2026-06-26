@@ -38,13 +38,13 @@ Design + module layout in chores-01 [[5]].
      `transact_retry`, `send_reboot_command`) to `transact.rs`.
      (done)
    - 0.3.0-3 refactor: move arg parsing, the `Command` enum, and
-     help text to `cli.rs`; scaffold `bench.rs`. (current)
+     help text to `cli.rs`; scaffold `bench.rs`. (done)
    - 0.3.0-4 passive bench: `bench [SECS]` measures the live
      stream only — drop the configure/measure/restore code;
      ASCII line-count + binary frame rate via a `0xFA` sniff
      (CRC-checked) + total wire throughput. Resolves the passive
      binary-rate open question [[1]] (0xFA sniff). Lands in
-     `bench.rs`.
+     `bench.rs`. (current)
    - 0.3.0-5 decompose config verbs: add `get-ascii`/`set-ascii`
      (reg 6) and `get-bin`/`set-bin` (reg 75) beside the
      existing `get-hz`/`set-hz`; bare-enable semantics.
