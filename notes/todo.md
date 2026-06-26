@@ -14,6 +14,8 @@ by the "plan" — a bulleted list of the development "ladder":
    - 0.xx.y-2 blah blah blah
    - 0.xx.y close-out and validation
 
+_No cycle currently in progress._
+
 ## Todo
 
  Entries are in **strict priority rank** — #1 highest,
@@ -28,14 +30,14 @@ by the "plan" — a bulleted list of the development "ladder":
  detail goes in `notes/chores/chores-NN.md` design
  subsections (link via `[N]` ref).
 
-
 ## Done
 
 Completed tasks are moved from `## Todo` to here, `## Done`, as they are completed
 and older `## Done` sections are moved to [done.md](done.md) to keep this file small.
 
-- docs: completed dummy chore (0.1.0) [[1]]
+- feat: default RPi5 UART, fix binary port on TTL [[1]],[[2]]
 
 # References
 
-[1]: chores/chores-01.md#docs-completed-dummy-chore-010
+[1]: chores/chores-01.md#vn-100-register-75-serial-port-numbering-on-ttl
+[2]: chores/chores-01.md#fix-binary-output-targets-the-wrong-vn-100-serial-port-on-ttl

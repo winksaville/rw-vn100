@@ -260,6 +260,24 @@ fn parse_ascii_type(s: &str) -> Result<u8, String> {
         })
 }
 
+/// Parse the `--serial-port` value into a register-75 `asyncMode` code.
+///
+/// - `1` / `2` target one of the VN-100's two UARTs; `both` (or `3`) targets
+///   both. The default elsewhere is `2`, the RPi5 TTL header (the flight
+///   target); the RS-232 bench is port 1. Selecting a port also subjects it to
+///   the register-75 fit check, so `both` is avoided as a default — a port left
+///   at a low baud would veto a frame the connected port could take.
+fn parse_serial_port(s: &str) -> Result<u8, String> {
+    match s.trim().to_lowercase().as_str() {
+        "1" => Ok(1),
+        "2" => Ok(2),
+        "3" | "both" => Ok(3),
+        other => Err(format!(
+            "invalid --serial-port `{other}`; choose 1, 2, or both"
+        )),
+    }
+}
+
 /// Display name for an ADOR value, e.g. 8 -> "VNYMR".
 fn ascii_type_name(value: u8) -> String {
     ASCII_TYPES
@@ -304,11 +322,15 @@ enum Command {
     },
     /// Configure an output (ASCII async by default, or binary with `--bin`) and
     /// measure the achieved rate, then restore prior state.
+    ///
+    /// - `serial_port` is the register-75 `asyncMode` (binary only): 1 or 2 for
+    ///   one of the VN-100's two UARTs, 3 for both. Ignored for the ASCII bench.
     Bench {
         binary: bool,
         hz: u32,
         secs: u64,
         fields: Vec<&'static Field>,
+        serial_port: u8,
         ascii_type: Option<u8>,
     },
 }
@@ -403,6 +425,15 @@ fn help_text() -> String {
         ],
     ));
     s.push_str(&help_row(
+        "--serial-port P",
+        &[
+            "Binary only: VN-100 UART(s) to stream on — 1, 2,",
+            "or both (default 2, the RPi5 TTL header). The",
+            "RS-232 bench is port 1. `both` also makes a port",
+            "left at a low baud veto the fit check.",
+        ],
+    ));
+    s.push_str(&help_row(
         "--type NAME",
         &[
             "ASCII only: set the message preset (register 6) first.",
@@ -413,7 +444,10 @@ fn help_text() -> String {
     s.push_str("\nGlobal options:\n");
     s.push_str(&help_row(
         "--port PORT",
-        &["Serial device (default: /dev/ttyUSB0)."],
+        &[
+            "Serial device (default: /dev/ttyAMA0, the RPi5",
+            "header UART). Use /dev/ttyUSB0 for a USB adapter.",
+        ],
     ));
     s.push_str(&help_row(
         "--baud BAUD",
@@ -439,7 +473,7 @@ fn help_text() -> String {
     s.push_str("  rdwr_vn100 get-hz\n");
     s.push_str("  rdwr_vn100 set-hz 40 --persist\n");
     s.push_str("  rdwr_vn100 rrg 1                      # model number\n");
-    s.push_str("  rdwr_vn100 bench --bin --hz 200 --fields time,accel,gyro,quat\n");
+    s.push_str("  rdwr_vn100 bench --bin --hz 200 --fields accel,gyro\n");
     s.push_str("  rdwr_vn100 bench --hz 50              # ASCII async at 50 Hz\n");
     s
 }
@@ -460,13 +494,14 @@ fn parse_args<I: Iterator<Item = String>>(args: I) -> Result<(Config, Command), 
         ));
     }
 
-    let mut port = "/dev/ttyUSB0".to_string();
+    let mut port = "/dev/ttyAMA0".to_string();
     let mut baud = 115_200u32;
     let mut persist = false;
     let mut binary = false;
     let mut hz: Option<u32> = None;
     let mut secs: Option<u64> = None;
     let mut fields_arg: Option<String> = None;
+    let mut serial_port_arg: Option<String> = None;
     let mut type_arg: Option<String> = None;
     let mut positional: Vec<String> = Vec::new();
 
@@ -500,6 +535,9 @@ fn parse_args<I: Iterator<Item = String>>(args: I) -> Result<(Config, Command), 
                 )
             }
             "--fields" => fields_arg = Some(args.next().ok_or("--fields requires a value")?),
+            "--serial-port" => {
+                serial_port_arg = Some(args.next().ok_or("--serial-port requires a value")?)
+            }
             "--type" => type_arg = Some(args.next().ok_or("--type requires a value")?),
             _ => positional.push(arg),
         }
@@ -583,11 +621,20 @@ fn parse_args<I: Iterator<Item = String>>(args: I) -> Result<(Config, Command), 
                     Some(list) => parse_fields(list)?,
                     None => default_fields(),
                 };
+                // Default to port 2, the RPi5 TTL header (the flight target).
+                // Not `both`: selecting a port also subjects it to the reg-75
+                // fit check, so once port 2 is raised to a high baud with port 1
+                // left low, `both` would let port 1 veto a frame port 2 can take.
+                let serial_port = match &serial_port_arg {
+                    Some(s) => parse_serial_port(s)?,
+                    None => 2,
+                };
                 Command::Bench {
                     binary: true,
                     hz,
                     secs,
                     fields,
+                    serial_port,
                     ascii_type: None,
                 }
             } else {
@@ -595,6 +642,13 @@ fn parse_args<I: Iterator<Item = String>>(args: I) -> Result<(Config, Command), 
                     return Err(
                         "--fields only applies with --bin (ASCII async uses preset messages, \
                          not arbitrary fields)"
+                            .into(),
+                    );
+                }
+                if serial_port_arg.is_some() {
+                    return Err(
+                        "--serial-port only applies with --bin (register 75); the ASCII async \
+                         output targets the connected port automatically"
                             .into(),
                     );
                 }
@@ -613,6 +667,7 @@ fn parse_args<I: Iterator<Item = String>>(args: I) -> Result<(Config, Command), 
                     hz,
                     secs,
                     fields: Vec::new(),
+                    serial_port: 0, // unused for ASCII
                     ascii_type,
                 }
             }
@@ -1032,12 +1087,18 @@ fn report_bench(unit: &str, target_hz: u32, m: Measured, baud: u32) {
 
 /// Configure a binary output (reg 75) with `fields` at `hz`, measure the frame
 /// rate for `secs`, then restore the prior state.
+///
+/// - `serial_port` is the register-75 `asyncMode`: 1 / 2 for one of the
+///   VN-100's two UARTs, 3 for both. Binary only streams on the UART the host
+///   is wired to, so this must include that port (the RPi5 TTL header is
+///   port 2; the RS-232 bench is port 1).
 fn bench_binary<S: Read + Write>(
     port: &mut S,
     baud: u32,
     hz: u32,
     secs: u64,
     fields: &[&Field],
+    serial_port: u8,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let divisor = 800 / hz; // device IMU base rate is 800 Hz
     let mask: u16 = fields.iter().fold(0, |m, f| m | (1u16 << f.bit));
@@ -1055,9 +1116,10 @@ fn bench_binary<S: Read + Write>(
     )?;
     let prev_hz = parse_reg07(&prev).unwrap();
 
-    // Configure Binary Output 1 (reg 75) on serial1. A $VNERR here means the
-    // chosen fields+rate don't fit the current baud — nothing else has changed.
-    let cfg = format!("VNWRG,75,1,{divisor},01,{mask:04X}");
+    // Configure Binary Output 1 (reg 75) on the chosen serial port(s). A $VNERR
+    // here means the chosen fields+rate don't fit the current baud — nothing
+    // else has changed.
+    let cfg = format!("VNWRG,75,{serial_port},{divisor},01,{mask:04X}");
     transact_retry(
         port,
         &build_command(&cfg),
@@ -1382,10 +1444,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             hz,
             secs,
             fields,
+            serial_port,
             ascii_type,
         } => {
             if binary {
-                bench_binary(&mut port, config.baud, hz, secs, &fields)?;
+                bench_binary(&mut port, config.baud, hz, secs, &fields, serial_port)?;
             } else {
                 bench_ascii(&mut port, config.baud, hz, secs, ascii_type)?;
             }
@@ -1546,10 +1609,15 @@ mod tests {
         let (_, c) = parse_args(args).unwrap();
         match c {
             Command::Bench {
-                binary, hz, fields, ..
+                binary,
+                hz,
+                fields,
+                serial_port,
+                ..
             } => {
                 assert!(binary);
                 assert_eq!(hz, 200);
+                assert_eq!(serial_port, 2); // default port 2 (RPi5 TTL header)
                 let names: Vec<&str> = fields.iter().map(|f| f.name).collect();
                 assert_eq!(names, vec!["time", "gyro", "accel"]); // bits 0, 5, 8
             }
@@ -1557,6 +1625,35 @@ mod tests {
         }
         // --fields requires --bin
         assert!(parse_args(["bench", "--fields", "time"].into_iter().map(String::from)).is_err());
+    }
+
+    #[test]
+    fn parses_serial_port() {
+        assert_eq!(parse_serial_port("1").unwrap(), 1);
+        assert_eq!(parse_serial_port("2").unwrap(), 2);
+        assert_eq!(parse_serial_port("both").unwrap(), 3);
+        assert_eq!(parse_serial_port("3").unwrap(), 3);
+        assert!(parse_serial_port("0").is_err());
+
+        // --serial-port flows through to the binary bench config.
+        let (_, c) = parse_args(
+            ["bench", "--bin", "--serial-port", "2"]
+                .into_iter()
+                .map(String::from),
+        )
+        .unwrap();
+        match c {
+            Command::Bench { serial_port, .. } => assert_eq!(serial_port, 2),
+            _ => panic!("expected Bench"),
+        }
+
+        // --serial-port requires --bin (ASCII targets the connected port).
+        assert!(parse_args(
+            ["bench", "--serial-port", "2"]
+                .into_iter()
+                .map(String::from)
+        )
+        .is_err());
     }
 
     #[test]
@@ -1617,12 +1714,14 @@ mod tests {
                 hz,
                 secs,
                 fields,
+                serial_port,
                 ascii_type,
             } => {
                 assert!(!binary); // ASCII is the default
                 assert_eq!(hz, 50);
                 assert_eq!(secs, 3);
                 assert!(fields.is_empty());
+                assert_eq!(serial_port, 0); // unused for ASCII
                 assert_eq!(ascii_type, None);
             }
             _ => panic!("expected Bench"),
