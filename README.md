@@ -52,7 +52,9 @@ Global options: `--port PORT` (default `/dev/ttyUSB0`), `--baud BAUD` (default
 
 > For the **authoritative** register/enum/field values this tool relies on — with
 > citations to the ICD (`../docs/`) and the vnsdk headers — see
-> [`REFERENCE.md`](REFERENCE.md).
+> [`REFERENCE.md`](REFERENCE.md). For the tool's internal structure and the design
+> decisions behind it (module map, transaction model), see
+> [`ARCHITECTURE.md`](ARCHITECTURE.md).
 
 **ASCII commands** look like `$<payload>*XX\r\n`, where `XX` is the 8-bit XOR
 checksum of everything between `$` and `*`:

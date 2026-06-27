@@ -7,11 +7,11 @@
 use crate::proto::*;
 
 /// Frequencies (Hz) the VN-100 accepts for the async data output rate.
-/// Authoritative: REFERENCE.md "Register 7" (ICD Reg 7; vnsdk AsyncOutputFreq::Adof).
+/// Authoritative: REFERENCE.md "Register 7" (ICD §3.2.4 Table 3.9; vnsdk AsyncOutputFreq::Adof).
 const VALID_RATES: &[u32] = &[1, 2, 4, 5, 10, 20, 25, 40, 50, 100, 200];
 
 /// Serial baud rates the VN-100 supports (register 5).
-/// Authoritative: REFERENCE.md "Register 5" (ICD Reg 5; vnsdk BaudRate::BaudRates).
+/// Authoritative: REFERENCE.md "Register 5" (ICD §3.2.2 Table 3.3; vnsdk BaudRate::BaudRates).
 const VALID_BAUDS: &[u32] = &[
     9600, 19200, 38400, 57600, 115200, 128000, 230400, 460800, 921600,
 ];

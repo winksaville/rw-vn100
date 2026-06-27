@@ -117,7 +117,7 @@ pub fn verify_checksum(line: &str) -> Result<(), String> {
 }
 
 /// Human-readable description of a VN-100 system error code.
-/// Authoritative: REFERENCE.md "Error responses" (ICD §1; vnsdk Errors.hpp Error).
+/// Authoritative: REFERENCE.md "Error responses" (ICD §1.5 Table 1.6; vnsdk Errors.hpp Error).
 pub fn error_description(code: u8) -> &'static str {
     match code {
         1 => "hard fault",
@@ -181,7 +181,8 @@ pub fn parse_reg06(line: &str) -> Option<u8> {
 
 /// VectorNav 16-bit CRC (CRC-CCITT/XMODEM, the algorithm from their app note).
 /// A valid binary packet, run from the groups byte through the trailing CRC,
-/// produces 0. Authoritative: REFERENCE.md "Framing & checksums" (ICD §1.4).
+/// produces 0. Authoritative: REFERENCE.md "Framing & checksums"
+/// (ICD §2.1.3 message format; §1.4.3 CRC16).
 pub fn vn_crc16(data: &[u8]) -> u16 {
     let mut crc: u16 = 0;
     for &b in data {

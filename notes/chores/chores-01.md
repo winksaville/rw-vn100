@@ -95,6 +95,9 @@ reconnect count that Issue #1 ties to wedges.
 - **One connection per invocation** — the whole line opens the
   port once and runs its steps in order. See
   [Step grammar](#step-grammar-joined-tokens-space-separated-steps).
+  Reading a register while that one connection is already streaming
+  — and why rw-vn100 may discard stream data when it does — is in
+  ARCHITECTURE.md [[9]].
 - **Universal rate.** `set-hz=N` is a desired rate independent of
   output mode. See
   [Universal rate (option A)](#universal-rate-option-a).
@@ -383,4 +386,5 @@ previously added.
 [6]: https://github.com/winksaville/rw-vn100/commit/ec6c523d4991 "ec6c523d499125093f5e9a3daac60e145dffaf40"
 [7]: https://github.com/winksaville/rw-vn100/commit/cb3c720fefdf "cb3c720fefdf078c21475698c0675117588e988a"
 [8]: https://github.com/winksaville/rw-vn100/commit/3e2c4983c744 "3e2c4983c744762a72dcfd4e3b670c6b0dc9e079"
+[9]: /ARCHITECTURE.md#transaction-model-rw-vn100-discard-vs-the-vnsdk-listening-thread
 
