@@ -145,7 +145,8 @@ pub enum Command {
     /// Common-group frame rate, and total wire throughput.
     Bench {
         secs: u64,
-        /// Raw-capture path from `--capture`; dumps every wire byte read.
+        /// Raw-capture path from `--capture`. Dumps every wire byte read,
+        /// plus a `<path>.timing` per-read CSV sidecar.
         capture: Option<String>,
     },
 }
@@ -237,7 +238,7 @@ pub fn help_text() -> String {
             "Passively measure whatever is already streaming",
             "(default 5 s) — no device writes. Reports ASCII",
             "line rate, binary frame rate, and wire throughput.",
-            "`--capture <path>` dumps raw wire bytes.",
+            "`--capture <path>` dumps raw bytes + .timing CSV.",
         ],
     ));
     s.push_str(&help_row(
@@ -271,7 +272,10 @@ pub fn help_text() -> String {
     ));
     s.push_str(&help_row(
         "--capture <path>",
-        &["Dump raw wire bytes to <path> (bench only)."],
+        &[
+            "Dump raw wire bytes to <path> (bench only); also",
+            "writes <path>.timing (per-read t_ns,offset CSV).",
+        ],
     ));
 
     s.push_str(&format!(

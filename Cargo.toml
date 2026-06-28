@@ -1,6 +1,6 @@
 [package]
 name = "rw-vn100"
-version = "0.3.0-5.7"
+version = "0.3.0-5.8"
 edition = "2024"
 
 [dependencies]

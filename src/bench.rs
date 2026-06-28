@@ -9,7 +9,10 @@
 //! - Passive means the binary frame length is unknown up front, so each frame
 //!   is sniffed from its own header (`try_common_frame`) rather than a config.
 //! - `--capture <path>` dumps every byte read to `<path>` (collected in
-//!   memory, written at exit) for offline diffing. Omitted → no behavior change.
+//!   memory, written at exit) for offline diffing. It also writes a
+//!   `<path>.timing` CSV sidecar — one row per `read()` (`t_ns,offset`) — so
+//!   inter-read jitter and idle gaps, which the raw byte dump can't show, are
+//!   recoverable offline. Omitted → no behavior change.
 
 use std::io::{ErrorKind, Read};
 use std::time::{Duration, Instant};
@@ -345,22 +348,48 @@ fn report(baud: u32, st: &Stats) {
     );
 }
 
-/// A `Read` adapter that records every byte it passes through.
+/// One `read()` event recorded alongside a `--capture` dump.
 ///
-/// - Backs the `RW_VN100_CAPTURE` raw dump: the recorded bytes are exactly
-///   what the scanner saw, so the dump diffs directly against a known-good
-///   capture (e.g. `test-data/both-streams.bin`).
+/// - `at_ns` — nanoseconds since capture start (a monotonic `Instant`).
+/// - `offset` — byte offset into `sink` where this read's bytes begin.
+///
+/// Read *k* spans `sink[reads[k].offset .. reads[k+1].offset]` (the last read
+/// runs to `sink.len()`). The byte count divided by Δ`at_ns` is the
+/// instantaneous delivery rate; an idle gap shows as a large Δ with few bytes.
+struct ReadMark {
+    at_ns: u64,
+    offset: u64,
+}
+
+/// A `Read` adapter that records every byte it passes through, plus per-read
+/// timing.
+///
+/// - Backs the `--capture` raw dump: the recorded bytes are exactly what the
+///   scanner saw, so the dump diffs directly against a known-good capture
+///   (e.g. `test-data/both-streams.bin`).
 /// - `inner` is the real port; `sink` accumulates the bytes in memory.
+/// - `start` / `reads` capture host-side timing: when each `read()` returned
+///   and where its bytes landed, so inter-read jitter is recoverable offline.
 struct CaptureReader<'a, S: Read> {
     inner: &'a mut S,
     sink: Vec<u8>,
+    start: Instant,
+    reads: Vec<ReadMark>,
 }
 
 impl<S: Read> Read for CaptureReader<'_, S> {
-    /// Read from `inner`, appending the bytes returned to `sink`.
+    /// Read from `inner`, appending the bytes returned to `sink` and recording
+    /// a `ReadMark` for each non-empty read.
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let offset = self.sink.len() as u64;
         let n = self.inner.read(buf)?;
         self.sink.extend_from_slice(&buf[..n]);
+        if n > 0 {
+            self.reads.push(ReadMark {
+                at_ns: self.start.elapsed().as_nanos() as u64,
+                offset,
+            });
+        }
         Ok(n)
     }
 }
@@ -389,10 +418,24 @@ pub fn bench<S: Read>(
         let mut cap = CaptureReader {
             inner: port,
             sink: Vec::with_capacity(cap_est),
+            start: Instant::now(),
+            reads: Vec::new(),
         };
         let st = measure(&mut cap, secs)?;
         std::fs::write(&path, &cap.sink)?;
-        println!("Captured {} raw bytes to {path}.", cap.sink.len());
+        // Timing sidecar: one `t_ns,offset` row per read, CSV so it diffs and
+        // loads in the offline analysis scripts.
+        let timing_path = format!("{path}.timing");
+        let mut timing = String::from("# t_ns,offset\n");
+        for m in &cap.reads {
+            timing.push_str(&format!("{},{}\n", m.at_ns, m.offset));
+        }
+        std::fs::write(&timing_path, &timing)?;
+        println!(
+            "Captured {} raw bytes to {path} ({} reads timed in {timing_path}).",
+            cap.sink.len(),
+            cap.reads.len()
+        );
         st
     } else {
         measure(port, secs)?
@@ -467,10 +510,21 @@ mod tests {
         let mut cap = CaptureReader {
             inner: &mut mock,
             sink: Vec::new(),
+            start: Instant::now(),
+            reads: Vec::new(),
         };
         let mut buf = [0u8; 16];
         while cap.read(&mut buf).unwrap() != 0 {}
         assert_eq!(cap.sink, data);
+
+        // Every non-empty read is timed; offsets strictly increase and stay
+        // in-bounds, timestamps are non-decreasing.
+        assert!(!cap.reads.is_empty());
+        for w in cap.reads.windows(2) {
+            assert!(w[1].offset > w[0].offset);
+            assert!(w[1].at_ns >= w[0].at_ns);
+        }
+        assert!(cap.reads.last().unwrap().offset < cap.sink.len() as u64);
     }
 
     #[test]

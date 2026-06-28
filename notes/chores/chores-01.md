@@ -406,6 +406,32 @@ run too — we think the same corruption can also garble an *outgoing*
 command (TX side), not just passive reads, though that is
 unconfirmed.
 
+### Host read-timing capture (jitter instrument)
+
+The raw `--capture` dump shows *what* corrupted but not the host-side
+timing around it, and the corruption rate varies with stream position
+(boundary frames flip more than mid-burst frames). To measure that,
+`--capture` now also writes a `<path>.timing` CSV sidecar — one
+`t_ns,offset` row per `read()`.
+
+- Records when each read returned and where its bytes landed, so
+  inter-read jitter and idle gaps are recoverable offline; the byte
+  dump alone can't show them.
+- Targets the open question of whether an idle gap at the
+  ASCII→binary boundary drives the elevated boundary-frame flip rate.
+  We think the effect is a burst-restart-after-idle: the first frame
+  out of a gap samples worst.
+- It is host *delivery* time, not wire time — kernel tty / USB
+  buffering batches reads, so it resolves ms-scale gaps, not bit-level
+  timing.
+
+Device-side stamps can't substitute. The binary `TimeStartup` field
+and the ASCII `SerialCount` field (reg 30) are both device *sampling*
+time, not host arrival. `SerialCount` mode 2 (`SYNCIN_TIME`) was
+verified on the device to **not** free-run without a SyncIn source:
+with nothing on the SyncIn pin the appended `T` field stayed pinned
+at ~12 ms (11890–12081 µs), bouncing, never climbing.
+
 Fix direction (the remaining Todo):
 
 - **Reopen-and-retry** (a work-around — the PL011 cause is below the
