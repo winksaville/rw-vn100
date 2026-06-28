@@ -80,13 +80,18 @@ pub struct Config {
     pub baud: u32,
 }
 
-/// What a `set-bin` step does to the binary output (register 75).
+/// What a binary-output config step does (register 75).
 ///
-/// - `Fields` — `set-bin=<list>`: set the Common field mask to these fields
-///   (and enable streaming if it was off).
-/// - `Enable` — bare `set-bin`: (re)enable streaming with the device's current
-///   mask.
-/// - `Off` — `set-bin=off`: disable streaming, leaving the mask configured.
+/// Fields and on/off live in separate verbs so they stay orthogonal
+/// — a mask write never toggles streaming, and a streaming toggle
+/// never touches the mask:
+///
+/// - `Fields` — `set-bin-fields=<list>`: set the Common field mask
+///   to these fields, leaving streaming on/off unchanged.
+/// - `Enable` — `set-bin=on`: enable streaming with the device's
+///   current mask (an error if no fields are configured).
+/// - `Off` — `set-bin=off`: disable streaming, leaving the mask
+///   configured.
 pub enum BinSet {
     Fields(Vec<&'static Field>),
     Enable,
@@ -189,16 +194,20 @@ pub fn help_text() -> String {
         &["Read the binary output: port, rate, fields (register 75)."],
     ));
     s.push_str(&help_row(
-        "set-bin=<FIELDS|off>",
+        "set-bin-fields=<FIELDS>",
         &[
-            "Set the binary field mask, or `off`. Bare `set-bin`",
-            "re-enables the current mask.",
+            "Set the binary field mask (register 75), leaving",
+            "streaming as-is.",
             &format!("Fields: {}", field_names()),
         ],
     ));
     s.push_str(&help_row(
         "set-bin-hz=<HZ>",
         &["Set the binary rate (register 75 divisor; HZ must divide 800)."],
+    ));
+    s.push_str(&help_row(
+        "set-bin=on|off",
+        &["Enable or disable binary streaming (needs fields to enable)."],
     ));
     s.push_str(&help_row(
         "baud <NEW> [--persist]",
@@ -271,8 +280,9 @@ pub fn help_text() -> String {
     s.push_str("Examples:\n");
     s.push_str("  rw-vn100 get-ascii\n");
     s.push_str("  rw-vn100 set-ascii-hz=40 --persist\n");
-    s.push_str("  rw-vn100 set-bin=time,accel,gyro    # configure binary fields\n");
-    s.push_str("  rw-vn100 set-bin-hz=200             # then set 200 Hz\n");
+    s.push_str("  rw-vn100 set-bin-fields=time,accel,gyro  # configure fields\n");
+    s.push_str("  rw-vn100 set-bin-hz=200                  # set the rate\n");
+    s.push_str("  rw-vn100 set-bin=on                      # then enable streaming\n");
     s.push_str("  rw-vn100 rrg 1                      # model number\n");
     s.push_str("  rw-vn100 bench --bin --hz 200 --fields accel,gyro\n");
     s
@@ -377,11 +387,25 @@ pub fn parse_args<I: Iterator<Item = String>>(args: I) -> Result<(Config, Comman
         }
         Some("set-bin") => {
             let action = match value {
-                None => BinSet::Enable,
+                Some("on") => BinSet::Enable,
                 Some("off") => BinSet::Off,
-                Some(list) => BinSet::Fields(parse_fields(list)?),
+                _ => {
+                    return Err(
+                        "set-bin needs =on or =off (set fields with set-bin-fields=<FIELDS>)"
+                            .to_string(),
+                    );
+                }
             };
             Command::SetBin { action, persist }
+        }
+        Some("set-bin-fields") => {
+            let list = value.ok_or(
+                "set-bin-fields needs a field list, e.g. `set-bin-fields=time,accel,gyro`",
+            )?;
+            Command::SetBin {
+                action: BinSet::Fields(parse_fields(list)?),
+                persist,
+            }
         }
         Some("set-bin-hz") => {
             let v = value.ok_or("set-bin-hz needs a rate, e.g. `set-bin-hz=200`")?;
@@ -452,7 +476,8 @@ pub fn parse_args<I: Iterator<Item = String>>(args: I) -> Result<(Config, Comman
         None => {
             return Err(
                 "missing command (`get-ascii`, `set-ascii`, `set-ascii-hz`, `get-bin`, \
-                 `set-bin`, `set-bin-hz`, `baud`, `rrg`, `wrg`, `bench`, `reset`, \
+                 `set-bin-fields`, `set-bin-hz`, `set-bin`, `baud`, `rrg`, `wrg`, \
+                 `bench`, `reset`, \
                  `factory-reset`, or `help`)"
                     .into(),
             );
@@ -519,9 +544,10 @@ mod tests {
 
     #[test]
     fn parses_set_bin_variants() {
-        // Field list is sorted to bit order (time=0, accel=8) and persisted.
+        // set-bin-fields sets the mask. The list sorts to bit order
+        // (time=0, accel=8) and persists.
         let (_, c) = parse_args(
-            ["set-bin=accel,time", "--persist"]
+            ["set-bin-fields=accel,time", "--persist"]
                 .into_iter()
                 .map(String::from),
         )
@@ -537,8 +563,8 @@ mod tests {
             }
             _ => panic!("expected SetBin Fields"),
         }
-        // Bare set-bin re-enables the current mask.
-        let (_, c) = parse_args(["set-bin"].into_iter().map(String::from)).unwrap();
+        // set-bin=on / =off toggle streaming.
+        let (_, c) = parse_args(["set-bin=on"].into_iter().map(String::from)).unwrap();
         assert!(matches!(
             c,
             Command::SetBin {
@@ -546,7 +572,6 @@ mod tests {
                 ..
             }
         ));
-        // set-bin=off disables.
         let (_, c) = parse_args(["set-bin=off"].into_iter().map(String::from)).unwrap();
         assert!(matches!(
             c,
@@ -555,8 +580,12 @@ mod tests {
                 ..
             }
         ));
-        // Unknown field is rejected.
+        // Bare set-bin and a non-on/off value are errors.
+        assert!(parse_args(["set-bin"].into_iter().map(String::from)).is_err());
         assert!(parse_args(["set-bin=bogus"].into_iter().map(String::from)).is_err());
+        // Unknown field, and bare set-bin-fields, are errors.
+        assert!(parse_args(["set-bin-fields=bogus"].into_iter().map(String::from)).is_err());
+        assert!(parse_args(["set-bin-fields"].into_iter().map(String::from)).is_err());
     }
 
     #[test]

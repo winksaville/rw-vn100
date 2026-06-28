@@ -13,7 +13,8 @@
 //! Commands implemented here:
 //!   get-ascii / set-ascii read/write the ASCII async preset    (register 6)
 //!   set-ascii-hz          write the ASCII async rate           (register 7)
-//!   get-bin / set-bin     read/configure the binary output     (register 75)
+//!   get-bin / set-bin     read / enable-disable binary output   (register 75)
+//!   set-bin-fields        write the Common field mask           (register 75)
 //!   set-bin-hz            write the binary rate (reg-75 divisor, 800/hz)
 //!   baud                  change the serial baud rate          (register 5)
 //!   rrg / wrg             generic read/write of any register   ($VNRRG / $VNWRG)
@@ -208,8 +209,9 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         Command::SetBin { action, persist } => {
-            // Read-modify-write reg 75: preserve the rateDivisor, change only the
-            // streaming port and/or the Common field mask per the action.
+            // Read-modify-write reg 75. Fields and on/off are orthogonal: a
+            // field write preserves async_mode, on/off preserves the mask.
+            // Both preserve the rateDivisor.
             let cur = transact_retry(
                 &mut port,
                 &build_command("VNRRG,75"),
@@ -218,21 +220,31 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                 &no_reply,
             )?;
             let r = parse_reg75(&cur).unwrap(); // OK: predicate ensured Some
-            // Enabling defaults to port 2 (the RPi5 TTL header) when binary is
-            // currently off; otherwise it keeps whichever port is already set.
-            let on_port = if r.async_mode == 0 { 2 } else { r.async_mode };
+            let mut defaulted_rate = false;
             let (mode, mask) = match action {
                 BinSet::Off => (0, r.mask),
-                BinSet::Enable => (on_port, r.mask),
+                BinSet::Enable => {
+                    // Enabling an empty mask would stream a zero-field frame the
+                    // device rejects; require fields first.
+                    if r.mask == 0 {
+                        return Err("no fields configured — set-bin-fields=<FIELDS> first".into());
+                    }
+                    // Default to port 2 (the RPi5 TTL header) when currently off;
+                    // otherwise keep whichever port is already set.
+                    let on_port = if r.async_mode == 0 { 2 } else { r.async_mode };
+                    defaulted_rate = r.divisor == 0;
+                    (on_port, r.mask)
+                }
                 BinSet::Fields(fields) => {
                     let m = fields.iter().fold(0u16, |acc, f| acc | (1u16 << f.bit));
-                    (on_port, m)
+                    defaulted_rate = r.divisor == 0;
+                    (r.async_mode, m)
                 }
             };
             // A never-configured output can read back divisor 0; fall back to
             // 40 Hz so the first enable yields a valid, low-rate stream.
             let divisor = if r.divisor == 0 { 20 } else { r.divisor };
-            if mode != 0 && divisor != r.divisor {
+            if defaulted_rate {
                 println!("(binary rate was unset; defaulting to 40 Hz — use set-bin-hz to change)");
             }
             let cfg = format!("VNWRG,75,{mode},{divisor},01,{mask:04X}");
@@ -273,7 +285,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                 5,
                 |l| l.starts_with("$VNWRG,75"),
                 "device did not accept the binary rate — a $VNERR 0x0C means the frame won't fit \
-                 at this baud; raise --baud or trim fields (set-bin=…)",
+                 at this baud; raise --baud or trim fields (set-bin-fields=…)",
             )?;
             println!("RX: {reply}");
             report_bin_config(&Reg75 {

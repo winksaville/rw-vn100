@@ -86,24 +86,13 @@ Design + module layout in chores-01 [[5]].
    failure via an env-gated raw dump and diff against the clean
    `test-data/both-streams.bin`. [[8]]
 
-2. Decompose `set-bin` (and `set-ascii`) into orthogonal verbs:
-   a field/preset write that never toggles streaming, plus
-   explicit `=on` / `=off`. Today `set-bin=<fields>` secretly
-   enables output too, conflating "what fields" with "whether it
-   streams". Lands with the step grammar so a single line —
-   `set-bin=time,ypr set-ascii=off set-bin=on` — reads
-   declaratively. Pin down on the way: `=on` defaults to port 2,
-   an empty-mask guard before `=on`, and bare `set-bin` as an
-   `=on` alias. [[1]]
-
-3. `set-bin+=<fields>` / `set-bin-=<fields>`: OR-in / mask-out
-   Common fields incrementally instead of restating the whole
-   set. The set-arithmetic generalizes to the other bitmask
+2. `set-bin-fields+=<FIELDS>` / `set-bin-fields-=<FIELDS>`: OR-in /
+   mask-out Common fields incrementally instead of restating the
+   whole set. The set-arithmetic generalizes to the other bitmask
    registers — Binary Output 2/3 (regs 76/77, identical layout)
    and reg 75's `asyncMode` serial-port mask — but not to
-   `set-ascii` (reg 6 is a single-valued preset, so only
-   `=on`/`=off` fits there). Builds on the orthogonal `set-bin`
-   verbs. [[1]]
+   `set-ascii` (reg 6 is a single-valued preset, not a bitmask).
+   Builds on the orthogonal `set-bin` verbs. [[1]]
 
 ## Done
 
@@ -114,6 +103,11 @@ and older `## Done` sections are moved to [done.md](done.md) to keep this file s
 - fix: bench silences async before binary config [[4]]
 - feat: decompose output config into register verbs [[6]]
 - feat: passive bench measures the live stream [[7]]
+- feat: split set-bin into fields / on-off verbs — `set-bin-fields`
+  sets the mask, `set-bin=on`/`off` toggles streaming, keeping them
+  orthogonal. ASCII stays as-is: reg 6 (ADOR) has no separate enable
+  bit (0=off, N=preset), so it can't be orthogonal without stateful
+  preset memory. [[1]]
 
 # References
 
