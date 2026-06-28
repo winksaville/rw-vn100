@@ -98,11 +98,43 @@ pub struct Config {
     pub baud: u32,
 }
 
+/// What a `set-bin` step does to the binary output (register 75).
+///
+/// - `Fields` — `set-bin=<list>`: set the Common field mask to these fields
+///   (and enable streaming if it was off).
+/// - `Enable` — bare `set-bin`: (re)enable streaming with the device's current
+///   mask.
+/// - `Off` — `set-bin=off`: disable streaming, leaving the mask configured.
+pub enum BinSet {
+    Fields(Vec<&'static Field>),
+    Enable,
+    Off,
+}
+
 pub enum Command {
     Help,
     Version,
-    GetHz,
-    SetHz {
+    /// Read the ASCII async preset (register 6).
+    GetAscii,
+    /// Write the ASCII async preset (register 6); `off` disables it.
+    SetAscii {
+        preset: u8,
+        persist: bool,
+    },
+    /// Write the ASCII async rate (register 7).
+    SetAsciiHz {
+        hz: u32,
+        persist: bool,
+    },
+    /// Read the binary output config (register 75).
+    GetBin,
+    /// Configure the binary output field mask (register 75).
+    SetBin {
+        action: BinSet,
+        persist: bool,
+    },
+    /// Write the binary output rate as register 75's rateDivisor (`800/hz`).
+    SetBinHz {
         hz: u32,
         persist: bool,
     },
@@ -160,13 +192,38 @@ pub fn help_text() -> String {
     s.push_str("Usage: rw-vn100 [--port PORT] [--baud BAUD] <command> [args]\n\n");
 
     s.push_str("Commands:\n");
+    s.push_str("  Output config — each verb owns one register; `--persist` on a\n");
+    s.push_str("  `set-*` writes flash. Bare `set-bin` re-enables the current mask.\n");
     s.push_str(&help_row(
-        "get-hz",
-        &["Read the async output rate (register 7)."],
+        "get-ascii",
+        &["Read the ASCII async preset (register 6)."],
     ));
     s.push_str(&help_row(
-        "set-hz <HZ> [--persist]",
-        &["Write the async output rate (validated)."],
+        "set-ascii=<PRESET|off>",
+        &[
+            "Set the ASCII async preset (register 6).",
+            &format!("Presets: {}", ascii_type_names()),
+        ],
+    ));
+    s.push_str(&help_row(
+        "set-ascii-hz=<HZ>",
+        &["Set the ASCII async rate (register 7)."],
+    ));
+    s.push_str(&help_row(
+        "get-bin",
+        &["Read the binary output: port, rate, fields (register 75)."],
+    ));
+    s.push_str(&help_row(
+        "set-bin=<FIELDS|off>",
+        &[
+            "Set the binary field mask, or `off`. Bare `set-bin`",
+            "re-enables the current mask.",
+            &format!("Fields: {}", field_names()),
+        ],
+    ));
+    s.push_str(&help_row(
+        "set-bin-hz=<HZ>",
+        &["Set the binary rate (register 75 divisor; HZ must divide 800)."],
     ));
     s.push_str(&help_row(
         "baud <NEW> [--persist]",
@@ -266,7 +323,9 @@ pub fn help_text() -> String {
         &["Save to flash so it survives a power cycle (set-hz, baud)."],
     ));
 
-    s.push_str(&format!("\nValid HZ (ASCII / set-hz): {VALID_RATES:?}\n"));
+    s.push_str(&format!(
+        "\nValid HZ (ASCII async / set-ascii-hz): {VALID_RATES:?}\n"
+    ));
     s.push_str("  Fixed in firmware; the device rejects others with a $VNERR.\n");
     s.push_str(&format!("Valid BAUD: {VALID_BAUDS:?}\n\n"));
 
@@ -275,11 +334,12 @@ pub fn help_text() -> String {
     s.push_str("      baud. Persist to keep it.\n\n");
 
     s.push_str("Examples:\n");
-    s.push_str("  rw-vn100 get-hz\n");
-    s.push_str("  rw-vn100 set-hz 40 --persist\n");
+    s.push_str("  rw-vn100 get-ascii\n");
+    s.push_str("  rw-vn100 set-ascii-hz=40 --persist\n");
+    s.push_str("  rw-vn100 set-bin=time,accel,gyro    # configure binary fields\n");
+    s.push_str("  rw-vn100 set-bin-hz=200             # then set 200 Hz\n");
     s.push_str("  rw-vn100 rrg 1                      # model number\n");
     s.push_str("  rw-vn100 bench --bin --hz 200 --fields accel,gyro\n");
-    s.push_str("  rw-vn100 bench --hz 50              # ASCII async at 50 Hz\n");
     s
 }
 
@@ -365,25 +425,67 @@ pub fn parse_args<I: Iterator<Item = String>>(args: I) -> Result<(Config, Comman
         }
     }
 
-    let command = match positional.first().map(String::as_str) {
-        Some("get-hz") => {
+    // The config verbs are `key=value` tokens; the older verbs (baud, rrg, wrg,
+    // bench, reset) take space-separated positional args. Split the command word
+    // on its first '=' so both shapes pass through one match — `value` is `Some`
+    // only for the `key=value` form.
+    let (verb, value): (Option<&str>, Option<&str>) = match positional.first() {
+        Some(c) => match c.split_once('=') {
+            Some((v, val)) => (Some(v), Some(val)),
+            None => (Some(c.as_str()), None),
+        },
+        None => (None, None),
+    };
+
+    let command = match verb {
+        Some("get-ascii") => {
             if persist {
-                return Err("--persist only applies to `set-hz`".into());
+                return Err("--persist applies to a `set-*` verb, not `get-ascii`".into());
             }
-            Command::GetHz
+            Command::GetAscii
         }
-        Some("set-hz") => {
-            let hz: u32 = positional
-                .get(1)
-                .ok_or("set-hz requires a frequency, e.g. `set-hz 40`")?
-                .parse()
-                .map_err(|_| "frequency must be a number")?;
+        Some("set-ascii") => {
+            let v = value
+                .ok_or("set-ascii needs a preset, e.g. `set-ascii=ymr` (or `set-ascii=off`)")?;
+            Command::SetAscii {
+                preset: parse_ascii_type(v)?,
+                persist,
+            }
+        }
+        Some("set-ascii-hz") => {
+            let v = value.ok_or("set-ascii-hz needs a rate, e.g. `set-ascii-hz=40`")?;
+            let hz: u32 = v.parse().map_err(|_| "ASCII rate must be a number")?;
             if !VALID_RATES.contains(&hz) {
                 return Err(format!(
-                    "{hz} Hz is not valid; choose one of {VALID_RATES:?}"
+                    "{hz} Hz is not a valid ASCII async rate; choose one of {VALID_RATES:?}"
                 ));
             }
-            Command::SetHz { hz, persist }
+            Command::SetAsciiHz { hz, persist }
+        }
+        Some("get-bin") => {
+            if persist {
+                return Err("--persist applies to a `set-*` verb, not `get-bin`".into());
+            }
+            Command::GetBin
+        }
+        Some("set-bin") => {
+            let action = match value {
+                None => BinSet::Enable,
+                Some("off") => BinSet::Off,
+                Some(list) => BinSet::Fields(parse_fields(list)?),
+            };
+            Command::SetBin { action, persist }
+        }
+        Some("set-bin-hz") => {
+            let v = value.ok_or("set-bin-hz needs a rate, e.g. `set-bin-hz=200`")?;
+            let hz: u32 = v.parse().map_err(|_| "binary rate must be a number")?;
+            if hz == 0 || 800 % hz != 0 {
+                return Err(format!(
+                    "{hz} Hz invalid for binary; the rate is 800/divisor, so HZ must divide 800 \
+                     (e.g. 50, 100, 200, 400)"
+                ));
+            }
+            Command::SetBinHz { hz, persist }
         }
         Some("baud") => {
             let new_baud: u32 = positional
@@ -497,7 +599,8 @@ pub fn parse_args<I: Iterator<Item = String>>(args: I) -> Result<(Config, Comman
         Some(other) => return Err(format!("unknown command `{other}`")),
         None => {
             return Err(
-                "missing command (`get-hz`, `set-hz`, `baud`, `rrg`, `wrg`, `bench`, `reset`, \
+                "missing command (`get-ascii`, `set-ascii`, `set-ascii-hz`, `get-bin`, \
+                 `set-bin`, `set-bin-hz`, `baud`, `rrg`, `wrg`, `bench`, `reset`, \
                  `factory-reset`, or `help`)"
                     .into(),
             );
@@ -512,22 +615,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn rejects_invalid_set_rate() {
-        let args = ["set-hz", "33"].into_iter().map(String::from);
-        assert!(parse_args(args).is_err());
-    }
-
-    #[test]
-    fn parses_flags_and_set_hz_command() {
-        let args = ["--port", "/dev/ttyACM0", "--baud", "921600", "set-hz", "40"]
-            .into_iter()
-            .map(String::from);
+    fn parses_set_ascii_hz_and_flags() {
+        let args = [
+            "--port",
+            "/dev/ttyACM0",
+            "--baud",
+            "921600",
+            "set-ascii-hz=40",
+        ]
+        .into_iter()
+        .map(String::from);
         let (config, command) = parse_args(args).unwrap();
         assert_eq!(config.port, "/dev/ttyACM0");
         assert_eq!(config.baud, 921_600);
         assert!(matches!(
             command,
-            Command::SetHz {
+            Command::SetAsciiHz {
                 hz: 40,
                 persist: false
             }
@@ -535,22 +638,95 @@ mod tests {
     }
 
     #[test]
-    fn set_hz_with_persist_flag() {
-        let args = ["set-hz", "40", "--persist"].into_iter().map(String::from);
-        let (_, command) = parse_args(args).unwrap();
-        assert!(matches!(
-            command,
-            Command::SetHz {
-                hz: 40,
-                persist: true
-            }
-        ));
+    fn rejects_invalid_ascii_rate() {
+        assert!(parse_args(["set-ascii-hz=33"].into_iter().map(String::from)).is_err());
     }
 
     #[test]
-    fn persist_with_get_hz_is_rejected() {
-        let args = ["get-hz", "--persist"].into_iter().map(String::from);
-        assert!(parse_args(args).is_err());
+    fn parses_set_ascii_preset_and_off() {
+        let (_, c) = parse_args(["set-ascii=ymr"].into_iter().map(String::from)).unwrap();
+        assert!(matches!(
+            c,
+            Command::SetAscii {
+                preset: 14,
+                persist: false
+            }
+        ));
+        let (_, c) = parse_args(["set-ascii=off"].into_iter().map(String::from)).unwrap();
+        assert!(matches!(c, Command::SetAscii { preset: 0, .. }));
+        // Bare set-ascii is an error: reg 6 has no separate enable bit.
+        assert!(parse_args(["set-ascii"].into_iter().map(String::from)).is_err());
+    }
+
+    #[test]
+    fn parses_get_ascii_with_persist_guard() {
+        let (_, c) = parse_args(["get-ascii"].into_iter().map(String::from)).unwrap();
+        assert!(matches!(c, Command::GetAscii));
+        assert!(parse_args(["get-ascii", "--persist"].into_iter().map(String::from)).is_err());
+    }
+
+    #[test]
+    fn parses_set_bin_variants() {
+        // Field list is sorted to bit order (time=0, accel=8) and persisted.
+        let (_, c) = parse_args(
+            ["set-bin=accel,time", "--persist"]
+                .into_iter()
+                .map(String::from),
+        )
+        .unwrap();
+        match c {
+            Command::SetBin {
+                action: BinSet::Fields(fields),
+                persist,
+            } => {
+                assert!(persist);
+                let names: Vec<&str> = fields.iter().map(|f| f.name).collect();
+                assert_eq!(names, vec!["time", "accel"]);
+            }
+            _ => panic!("expected SetBin Fields"),
+        }
+        // Bare set-bin re-enables the current mask.
+        let (_, c) = parse_args(["set-bin"].into_iter().map(String::from)).unwrap();
+        assert!(matches!(
+            c,
+            Command::SetBin {
+                action: BinSet::Enable,
+                ..
+            }
+        ));
+        // set-bin=off disables.
+        let (_, c) = parse_args(["set-bin=off"].into_iter().map(String::from)).unwrap();
+        assert!(matches!(
+            c,
+            Command::SetBin {
+                action: BinSet::Off,
+                ..
+            }
+        ));
+        // Unknown field is rejected.
+        assert!(parse_args(["set-bin=bogus"].into_iter().map(String::from)).is_err());
+    }
+
+    #[test]
+    fn parses_set_bin_hz_and_validates_divisor() {
+        let (_, c) = parse_args(["set-bin-hz=200"].into_iter().map(String::from)).unwrap();
+        assert!(matches!(
+            c,
+            Command::SetBinHz {
+                hz: 200,
+                persist: false
+            }
+        ));
+        // 150 does not divide 800.
+        assert!(parse_args(["set-bin-hz=150"].into_iter().map(String::from)).is_err());
+        // Bare set-bin-hz needs a value.
+        assert!(parse_args(["set-bin-hz"].into_iter().map(String::from)).is_err());
+    }
+
+    #[test]
+    fn parses_get_bin() {
+        let (_, c) = parse_args(["get-bin"].into_iter().map(String::from)).unwrap();
+        assert!(matches!(c, Command::GetBin));
     }
 
     #[test]

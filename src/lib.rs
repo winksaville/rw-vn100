@@ -11,12 +11,14 @@
 //! outputs (register 75) use a packed frame ending in a 16-bit CRC instead.
 //!
 //! Commands implemented here:
-//!   get-hz / set-hz       read/write the async output rate    (register 7)
+//!   get-ascii / set-ascii read/write the ASCII async preset    (register 6)
+//!   set-ascii-hz          write the ASCII async rate           (register 7)
+//!   get-bin / set-bin     read/configure the binary output     (register 75)
+//!   set-bin-hz            write the binary rate (reg-75 divisor, 800/hz)
 //!   baud                  change the serial baud rate          (register 5)
 //!   rrg / wrg             generic read/write of any register   ($VNRRG / $VNWRG)
-//!   bench                 configure an output (ASCII async by default, or a
-//!                         binary output with --bin) and measure the achieved
-//!                         rate, to see what fits a given baud
+//!   bench                 (legacy) configure an output and measure the achieved
+//!                         rate; superseded by passive bench in a later step
 //!   reset / factory-reset reboot / restore defaults            ($VNRST / $VNRFS)
 //!
 //! Key VN messages:
@@ -56,13 +58,55 @@ fn print_reg_fields(reply: &str) {
     }
 }
 
+/// Write the device's current settings to non-volatile memory (`$VNWNV`) so
+/// they survive a power cycle. Shared by the `set-*` verbs' `--persist`.
+fn save_to_flash<S: std::io::Read + std::io::Write>(
+    port: &mut S,
+    no_reply: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let confirm = transact_retry(
+        port,
+        &build_command("VNWNV"),
+        5,
+        |l| l.starts_with("$VNWNV"),
+        no_reply,
+    )?;
+    println!("RX: {confirm}");
+    println!("Settings written to non-volatile memory.");
+    Ok(())
+}
+
+/// Print a one-line summary of a binary-output (register 75) config.
+///
+/// - State is the streaming port (`off`, `port N`, or both).
+/// - Rate is `800 / divisor`; the Common fields come from the mask.
+fn report_bin_config(r: &Reg75) {
+    let state = match r.async_mode {
+        0 => "off".to_string(),
+        3 => "on (both ports)".to_string(),
+        p => format!("on (port {p})"),
+    };
+    let rate = if r.divisor > 0 {
+        format!("{} Hz", 800 / r.divisor as u32)
+    } else {
+        "rate unset".to_string()
+    };
+    let names: Vec<&str> = fields_from_mask(r.mask).iter().map(|f| f.name).collect();
+    println!(
+        "Binary output: {state}, {rate} (divisor {}), Common{names:?}.",
+        r.divisor
+    );
+}
+
 /// Parse args, open the serial port, and dispatch the requested command.
 pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     let (config, command) = match parse_args(std::env::args().skip(1)) {
         Ok(parsed) => parsed,
         Err(e) => {
-            eprintln!("error: {e}\n");
-            eprint!("{}", help_text());
+            // Print only the error (plus a pointer) — not the whole help, which
+            // on a small terminal scrolls the error itself off the top.
+            eprintln!("error: {e}");
+            eprintln!("run `rw-vn100 --help` for usage");
             std::process::exit(2);
         }
     };
@@ -105,19 +149,38 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     match command {
         Command::Help | Command::Version => unreachable!("handled above"),
 
-        Command::GetHz => {
+        Command::GetAscii => {
             let reply = transact_retry(
                 &mut port,
-                &build_command("VNRRG,07"),
+                &build_command("VNRRG,06"),
                 5,
-                |l| parse_reg07(l).is_some(),
+                |l| parse_reg06(l).is_some(),
                 &no_reply,
             )?;
             println!("RX: {reply}");
-            println!("Async output rate: {} Hz", parse_reg07(&reply).unwrap());
+            let v = parse_reg06(&reply).unwrap(); // OK: predicate guaranteed parse_reg06 Some
+            println!("ASCII async preset: {} (ADOR {v})", ascii_type_name(v));
         }
 
-        Command::SetHz { hz, persist } => {
+        Command::SetAscii { preset, persist } => {
+            let reply = transact_retry(
+                &mut port,
+                &build_command(&format!("VNWRG,06,{preset}")),
+                5,
+                |l| l.starts_with("$VNWRG,06"),
+                &no_reply,
+            )?;
+            println!("RX: {reply}");
+            println!(
+                "ASCII async preset set to {} (ADOR {preset}).",
+                ascii_type_name(preset)
+            );
+            if persist {
+                save_to_flash(&mut port, &no_reply)?;
+            }
+        }
+
+        Command::SetAsciiHz { hz, persist } => {
             let reply = transact_retry(
                 &mut port,
                 &build_command(&format!("VNWRG,07,{hz}")),
@@ -126,18 +189,101 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                 &no_reply,
             )?;
             println!("RX: {reply}");
-            println!("Async output rate: {} Hz", parse_reg07(&reply).unwrap());
-
+            println!("ASCII async rate: {} Hz", parse_reg07(&reply).unwrap()); // OK: predicate ensured Some
             if persist {
-                let confirm = transact_retry(
-                    &mut port,
-                    &build_command("VNWNV"),
-                    5,
-                    |l| l.starts_with("$VNWNV"),
-                    &no_reply,
-                )?;
-                println!("RX: {confirm}");
-                println!("Settings written to non-volatile memory.");
+                save_to_flash(&mut port, &no_reply)?;
+            }
+        }
+
+        Command::GetBin => {
+            let reply = transact_retry(
+                &mut port,
+                &build_command("VNRRG,75"),
+                5,
+                |l| parse_reg75(l).is_some(),
+                &no_reply,
+            )?;
+            println!("RX: {reply}");
+            report_bin_config(&parse_reg75(&reply).unwrap()); // OK: predicate ensured Some
+        }
+
+        Command::SetBin { action, persist } => {
+            // Read-modify-write reg 75: preserve the rateDivisor, change only the
+            // streaming port and/or the Common field mask per the action.
+            let cur = transact_retry(
+                &mut port,
+                &build_command("VNRRG,75"),
+                5,
+                |l| parse_reg75(l).is_some(),
+                &no_reply,
+            )?;
+            let r = parse_reg75(&cur).unwrap(); // OK: predicate ensured Some
+            // Enabling defaults to port 2 (the RPi5 TTL header) when binary is
+            // currently off; otherwise it keeps whichever port is already set.
+            let on_port = if r.async_mode == 0 { 2 } else { r.async_mode };
+            let (mode, mask) = match action {
+                BinSet::Off => (0, r.mask),
+                BinSet::Enable => (on_port, r.mask),
+                BinSet::Fields(fields) => {
+                    let m = fields.iter().fold(0u16, |acc, f| acc | (1u16 << f.bit));
+                    (on_port, m)
+                }
+            };
+            // A never-configured output can read back divisor 0; fall back to
+            // 40 Hz so the first enable yields a valid, low-rate stream.
+            let divisor = if r.divisor == 0 { 20 } else { r.divisor };
+            if mode != 0 && divisor != r.divisor {
+                println!("(binary rate was unset; defaulting to 40 Hz — use set-bin-hz to change)");
+            }
+            let cfg = format!("VNWRG,75,{mode},{divisor},01,{mask:04X}");
+            let reply = transact_retry(
+                &mut port,
+                &build_command(&cfg),
+                5,
+                |l| l.starts_with("$VNWRG,75"),
+                "device did not accept the binary config — a $VNERR 0x0C means it won't fit at \
+                 this baud; lower or disable ASCII async (set-ascii=off) first, or raise --baud",
+            )?;
+            println!("RX: {reply}");
+            report_bin_config(&Reg75 {
+                async_mode: mode,
+                divisor,
+                groups: 1,
+                mask,
+            });
+            if persist {
+                save_to_flash(&mut port, &no_reply)?;
+            }
+        }
+
+        Command::SetBinHz { hz, persist } => {
+            let cur = transact_retry(
+                &mut port,
+                &build_command("VNRRG,75"),
+                5,
+                |l| parse_reg75(l).is_some(),
+                &no_reply,
+            )?;
+            let r = parse_reg75(&cur).unwrap(); // OK: predicate ensured Some
+            let divisor = (800 / hz) as u16; // OK: parser guaranteed hz divides 800
+            let cfg = format!("VNWRG,75,{},{divisor},01,{:04X}", r.async_mode, r.mask);
+            let reply = transact_retry(
+                &mut port,
+                &build_command(&cfg),
+                5,
+                |l| l.starts_with("$VNWRG,75"),
+                "device did not accept the binary rate — a $VNERR 0x0C means the frame won't fit \
+                 at this baud; raise --baud or trim fields (set-bin=…)",
+            )?;
+            println!("RX: {reply}");
+            report_bin_config(&Reg75 {
+                async_mode: r.async_mode,
+                divisor,
+                groups: 1,
+                mask: r.mask,
+            });
+            if persist {
+                save_to_flash(&mut port, &no_reply)?;
             }
         }
 

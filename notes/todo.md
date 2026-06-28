@@ -39,19 +39,23 @@ Design + module layout in chores-01 [[5]].
      (done)
    - 0.3.0-3 refactor: move arg parsing, the `Command` enum, and
      help text to `cli.rs`; scaffold `bench.rs`. (done)
-   - 0.3.0-4 passive bench: `bench [SECS]` measures the live
+   - 0.3.0-4 feat: decompose output config into register verbs —
+     `get/set-ascii` (reg 6), `set-ascii-hz` (reg 7),
+     `get/set-bin` (reg 75), and `set-bin-hz` (the reg-75
+     divisor), all as `key=value` tokens. Drops `get-hz`/`set-hz`.
+     Keeps the legacy configure/measure `bench` as a parallel path
+     until -5. (done)
+   - 0.3.0-5 passive bench: `bench [SECS]` measures the live
      stream only — drop the configure/measure/restore code;
      ASCII line-count + binary frame rate via a `0xFA` sniff
      (CRC-checked) + total wire throughput. Resolves the passive
      binary-rate open question [[1]] (0xFA sniff). Lands in
-     `bench.rs`. (current)
-   - 0.3.0-5 decompose config verbs: add `get-ascii`/`set-ascii`
-     (reg 6) and `get-bin`/`set-bin` (reg 75) beside the
-     existing `get-hz`/`set-hz`; bare-enable semantics.
+     `bench.rs`. Now exercisable via the -4 verbs (`set-bin`
+     then `bench`).
    - 0.3.0-6 step grammar + one connection: shell-word steps,
      `+` token join, single port open, left-to-right execution,
-     option-A resolve (merge `set-bin`+`set-hz` into one reg-75
-     write).
+     merge `set-bin`+`set-bin-hz` in one word into a single reg-75
+     write.
    - 0.3.0-7 named states: `--config` TOML profile map;
      `save-state` / `set-state` / `restore-state`; default =
      bare-`restore-state` target, never auto-applied; baud
@@ -80,6 +84,7 @@ and older `## Done` sections are moved to [done.md](done.md) to keep this file s
 
 - feat: default RPi5 UART, fix binary port on TTL [[2]],[[3]]
 - fix: bench silences async before binary config [[4]]
+- feat: decompose output config into register verbs [[6]]
 
 # References
 
@@ -88,3 +93,4 @@ and older `## Done` sections are moved to [done.md](done.md) to keep this file s
 [3]: chores/chores-01.md#fix-binary-output-targets-the-wrong-vn-100-serial-port-on-ttl
 [4]: chores/chores-01.md#fix-bench-silences-async-before-binary-config
 [5]: chores/chores-01.md#refactor-split-mainrs-into-lib-modules
+[6]: chores/chores-01.md#feat-decompose-output-config-into-register-verbs

@@ -87,6 +87,16 @@ pub fn default_fields() -> Vec<&'static Field> {
     ]
 }
 
+/// The known Common-group fields selected by `mask`, ordered by bit — the same
+/// order the device emits them (`FIELDS` is bit-ordered, so a filter preserves
+/// it).
+pub fn fields_from_mask(mask: u16) -> Vec<&'static Field> {
+    FIELDS
+        .iter()
+        .filter(|f| mask & (1u16 << f.bit) != 0)
+        .collect()
+}
+
 /// Compute the VN-100 checksum: XOR of all bytes in `payload`.
 pub fn checksum(payload: &str) -> u8 {
     payload.bytes().fold(0u8, |acc, b| acc ^ b)
@@ -179,6 +189,52 @@ pub fn parse_reg06(line: &str) -> Option<u8> {
     body.split('*').next()?.trim().parse().ok()
 }
 
+/// The Binary Output 1 register (75) fields we decode.
+///
+/// - `async_mode` — the target serial port: 0 = off, 1 / 2 a single UART,
+///   3 = both.
+/// - `divisor` — the rateDivisor; the frame rate is `800 / divisor` Hz.
+/// - `groups` — the raw output-groups byte. We only decode the Common group
+///   (bit 0) today; the byte is kept for multi-group support to come.
+/// - `mask` — the Common-group field mask (0 when the Common bit is clear).
+pub struct Reg75 {
+    pub async_mode: u8,
+    pub divisor: u16,
+    /// Reserved: parsed now, read once multi-group decode lands (see struct doc).
+    #[allow(dead_code)]
+    pub groups: u8,
+    pub mask: u16,
+}
+
+/// Parse a `$VN(R|W)RG,75,<asyncMode>,<rateDivisor>,<groups>,<mask>...*XX` reply.
+///
+/// - `asyncMode` and `rateDivisor` are decimal; `groups` and the field `mask`
+///   are hex, per the ICD's register-75 ASCII form.
+/// - Only the Common group (groups bit 0) is decoded — its mask is the first
+///   group field, since Common is the lowest group bit. Returns `None` for any
+///   other (e.g. async) line.
+pub fn parse_reg75(line: &str) -> Option<Reg75> {
+    let body = line
+        .strip_prefix("$VNRRG,75,")
+        .or_else(|| line.strip_prefix("$VNWRG,75,"))?;
+    let body = body.split('*').next()?;
+    let mut it = body.split(',').map(str::trim);
+    let async_mode: u8 = it.next()?.parse().ok()?;
+    let divisor: u16 = it.next()?.parse().ok()?;
+    let groups = u8::from_str_radix(it.next()?, 16).ok()?;
+    let mask = if groups & 0x01 != 0 {
+        u16::from_str_radix(it.next()?, 16).ok()?
+    } else {
+        0
+    };
+    Some(Reg75 {
+        async_mode,
+        divisor,
+        groups,
+        mask,
+    })
+}
+
 /// VectorNav 16-bit CRC (CRC-CCITT/XMODEM, the algorithm from their app note).
 /// A valid binary packet, run from the groups byte through the trailing CRC,
 /// produces 0. Authoritative: REFERENCE.md "Framing & checksums"
@@ -257,6 +313,29 @@ mod tests {
         let mask: u16 = f.iter().fold(0, |m, x| m | (1u16 << x.bit));
         assert_eq!(mask, 0x0101); // time bit0 + accel bit8 — matches the known config
         assert!(parse_fields("bogus").is_err());
+    }
+
+    #[test]
+    fn parses_reg75_and_maps_mask_to_fields() {
+        // asyncMode/divisor are decimal; groups/mask are hex.
+        let r = parse_reg75("$VNRRG,75,2,4,01,0739*7E").unwrap();
+        assert_eq!(r.async_mode, 2);
+        assert_eq!(r.divisor, 4); // 800/4 = 200 Hz
+        assert_eq!(r.groups, 1);
+        assert_eq!(r.mask, 0x0739);
+        let names: Vec<&str> = fields_from_mask(r.mask).iter().map(|f| f.name).collect();
+        assert_eq!(
+            names,
+            vec!["time", "ypr", "quat", "gyro", "accel", "imu", "magpres"]
+        );
+
+        // Binary off (asyncMode 0) still reports the retained mask.
+        let off = parse_reg75("$VNWRG,75,0,4,01,0101*00").unwrap();
+        assert_eq!(off.async_mode, 0);
+        assert_eq!(off.mask, 0x0101); // time + accel
+
+        // A non-reg-75 line does not parse.
+        assert!(parse_reg75("$VNRRG,07,40*4C").is_none());
     }
 
     #[test]

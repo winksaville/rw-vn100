@@ -86,21 +86,31 @@ reconnect count that Issue #1 ties to wedges.
   streaming — no device writes, no restore — default 5 s. This
   removes the configure→measure→restore dance that is bench's
   current bulk and its only wedge surface.
-- **Decomposed config verbs**, each owning one register concern:
-    - `get-hz` / `set-hz=<HZ>` — reg 7 async rate (exists today).
+- **Decomposed config verbs**, each owning one register concern,
+  all written as `key=value` tokens (the eventual step-grammar
+  spelling, adopted from the start):
     - `get-ascii` / `set-ascii=<MODE|off>` — reg 6 ASCII preset.
-    - `get-bin` / `set-bin=<FIELDS|off>` — reg 75 binary output.
-    - Bare `set-bin` enables binary with the *current* fields;
-      bare `set-ascii` enables ASCII with the current preset.
+    - `get-ascii-hz` / `set-ascii-hz=<HZ>` — reg 7 ASCII async
+      rate. Replaces the old `get-hz`/`set-hz`, which are dropped.
+    - `get-bin` / `set-bin=<FIELDS|off>` — reg 75 binary field
+      mask.
+    - `set-bin-hz=<HZ>` — reg 75 rateDivisor (`800/HZ`); read it
+      back via `get-bin`.
+    - Bare `set-bin` enables binary with the *current* fields.
+      Bare `set-ascii` is an error — reg 6 conflates on/off with
+      the preset (0 = off), so there is no separate enable to flip;
+      name a preset.
 - **One connection per invocation** — the whole line opens the
   port once and runs its steps in order. See
   [Step grammar](#step-grammar-joined-tokens-space-separated-steps).
   Reading a register while that one connection is already streaming
   — and why rw-vn100 may discard stream data when it does — is in
   ARCHITECTURE.md [[9]].
-- **Universal rate.** `set-hz=N` is a desired rate independent of
-  output mode. See
-  [Universal rate (option A)](#universal-rate-option-a).
+- **Per-mode rate verbs.** Each output carries its rate in a
+  different register, so the rate is an explicit per-mode verb —
+  `set-ascii-hz` (reg 7) and `set-bin-hz` (reg 75 divisor) — and
+  no verb is mode-dependent. See
+  [Per-mode rate verbs](#per-mode-rate-verbs).
 - **File-backed named states.** A TOML config holds named
   profiles. See [Named states](#named-states-file-backed--default).
 
@@ -119,25 +129,35 @@ space handling.
   comma — so the grammar stays unambiguous and flat (the
   comma-nested alternative would make a value contain
   sub-assignments, i.e. recursion).
-- Intra-step order is also left-to-right: `set-hz=50+bench` =
-  apply, then measure.
+- Intra-step order is also left-to-right: `set-ascii-hz=50+bench`
+  = apply, then measure.
 - This unlocks a single-connection **sweep**:
-  `save-state set-hz=50+bench set-hz=100+bench set-hz=200+bench
-  restore-state` — snapshot, three configure-and-measure steps,
-  restore, all on one open.
+  `save-state set-bin-hz=50+bench set-bin-hz=100+bench
+  set-bin-hz=200+bench restore-state` — snapshot, three
+  configure-and-measure steps, restore, all on one open.
 
-### Universal rate (option A)
+### Per-mode rate verbs
 
-`set-hz=N` reads as one desired rate regardless of mode; the
-tool maps it to the right register.
+Each output mode carries its rate in a different register, so the
+rate is an explicit per-mode verb rather than one mode-dependent
+`set-hz`.
 
-- ASCII: writes reg 7 directly.
-- Binary: the rate is the rateDivisor *inside* reg 75 (`800/N`),
-  the same register as the field mask — so `set-bin=…+set-hz=N`
-  must resolve to one combined reg-75 write. The `+`-join is what
-  makes that explicit: same word → one write.
-- Bare `set-bin` with no `set-hz` in the same step keeps the
-  device's current divisor.
+- `set-ascii-hz=N` writes reg 7 (the ASCII async rate).
+- `set-bin-hz=N` writes the rateDivisor (`800/N`) *inside* reg 75
+  — a read-modify-write that preserves the field mask. Because it
+  stands alone, the binary rate is settable without the `+`-join,
+  so a device reaches e.g. 200 Hz binary through the verbs in the
+  config-verbs step, not only once the step grammar lands.
+- `set-bin` and `set-bin-hz` both touch reg 75. Run separately
+  they are two writes (mask, then divisor); the `+`-join can merge
+  `set-bin=…+set-bin-hz=N` into one write as an optimization, but
+  correctness never depends on it.
+- We considered a single **universal `set-hz`** (option A) mapping
+  to reg 7 or the reg-75 divisor by mode, and dropped it: it made
+  one verb mode-dependent and *required* the `+`-join to fold a
+  binary rate into the reg-75 write, coupling the rate story to
+  the step grammar. Per-mode verbs are each one register concern
+  and stand alone.
 
 ### Named states (file-backed) + default
 
@@ -165,6 +185,15 @@ key. Three verbs, three distinct jobs:
 
 - `set-bin` and `set-ascii` both present on one line: error
   ("pick one output to bench") vs measure both — leaning error.
+- `set-bin` rejected with `$VNERR` 0x0C while ASCII async is still
+  streaming: the device's combined-load fit check (sum of streams
+  on the port — see
+  [Bench combined-load fit check at low baud](#bench-combined-load-fit-check-at-low-baud))
+  can veto a binary write that fits on its own.
+  A standalone `set-bin` must *not* silently silence ASCII (that
+  is the surprise mutation passivity protects against), so the
+  lean is to surface the error with a hint ("ASCII async is using
+  the budget — lower or disable it first") rather than auto-fix.
 - Persist: apply volatile by default (reverts on power cycle,
   matches today's bench), with `--persist` available.
 - `reset` / `factory-reset` reboot the device mid-line — constrain
@@ -194,11 +223,47 @@ tests + clippy + a smoke run.
 - `transact.rs` — port I/O: `read_reply`, `transact`,
   `transact_retry`, `send_reboot_command`.
 - `cli.rs` — `parse_args`, the `Command` enum, and help text.
-- `bench.rs` — the `bench` command (passive, built in 0.3.0-4).
+- `bench.rs` — the `bench` command (passive, built in 0.3.0-5).
 - `lib.rs` ties the modules together; `main.rs` is thin — parse
   args, open the port, dispatch.
 - Ladder: proto (-1), transact (-2), cli + bench scaffold (-3);
   one module per commit so each diff is a reviewable move.
+
+
+## feat: decompose output config into register verbs
+
+Commits:
+
+The old one-shot `bench --bin …` was the only convenient way to
+configure an output, coupling measurement to a
+configure→measure→restore device mutation. This step breaks
+configuration into composable verbs — one per register — so
+configuration and measurement are separable, and the passive `bench`
+to come (-5) has an easy way to turn an output on for testing. The
+verb set and rationale are in the cycle design above
+([Per-mode rate verbs](#per-mode-rate-verbs)).
+
+- Six verbs, all `key=value` tokens (the eventual step-grammar
+  spelling, adopted from the start): `get/set-ascii` (reg 6 preset),
+  `set-ascii-hz` (reg 7 rate), `get/set-bin` (reg 75 field mask),
+  `set-bin-hz` (reg 75 rateDivisor).
+- `get-hz` / `set-hz` are dropped — `set-ascii-hz` is the same reg-7
+  write under a mode-explicit name, and nothing depended on the old
+  spelling.
+- `set-bin` / `set-bin-hz` are read-modify-writes of reg 75
+  (round-trip confirmed on the device at 921600):
+    - `set-bin` preserves the divisor and sets the Common mask,
+      enabling on port 2 (the RPi5 TTL header) when binary was off.
+    - `set-bin-hz` preserves the port and mask, changing only the
+      divisor.
+- Passivity is preserved: a `set-bin` rejected by the device's
+  combined-load fit check (`$VNERR` 0x0C) surfaces the error with a
+  hint, rather than silently disabling ASCII async. See the parked
+  [open question](#open-questions-resolve-before-coding-the-relevant-step).
+- The legacy configure/measure `bench` stays as a parallel path
+  until passive bench (-5) replaces it.
+- On a parse error the CLI now prints just the error plus a `--help`
+  pointer — the full help dump scrolled the error off a small screen.
 
 
 ## fix: binary output targets the wrong VN-100 serial port on TTL
