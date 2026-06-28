@@ -327,14 +327,16 @@ fn report(baud: u32, st: &Stats) {
         println!("Binary: none seen.");
     }
 
-    let bits = if secs > 0.0 {
-        st.total_bytes as f64 * 10.0 / secs
+    let bytes_per_s = if secs > 0.0 {
+        st.total_bytes as f64 / secs
     } else {
         0.0
     };
+    let bits = bytes_per_s * 10.0;
     let pct = 100.0 * bits / baud as f64;
     println!(
-        "Wire throughput ~{:.0} kbit/s = {:.0}% of the {:.1} kbit/s {baud}-baud link.",
+        "Wire throughput ~{:.0} B/s = ~{:.0} kbit/s = {:.0}% of the {:.1} kbit/s {baud}-baud link.",
+        bytes_per_s,
         bits / 1000.0,
         pct,
         baud as f64 / 1000.0
