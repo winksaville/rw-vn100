@@ -335,6 +335,8 @@ re-opening clears; and that the old configure/measure `bench` was
 shielded by its pre-measure `transact_retry` (which primed the port
 and would fail loudly on a bad baud) while the passive bench reads
 cold. This does **not** explain the low-throughput failure.
+(Superseded — the confirmed subsection below shows framing stays
+intact and the corruption is a B6 bit-flip, not a shifted window.)
 
 Next steps (AM):
 
@@ -361,9 +363,17 @@ failed (20%); the streaming device never changed, and the next
 open always parsed clean.
 
 - **Full-misframe** (`test-data/zero-parse/misframe-fail.bin`) —
-  full ~26.9 KB read, frame-*shaped* (`fa 01 39 07` header and time
-  field in place) but values corrupted, so every CRC / checksum
-  fails and 0 parse. The "full ~269 kbit/s, none parsed" case.
+  "misframe" is a misnomer: framing is **intact**. All ~200 frames
+  are present (tolerating a bit-6 flip on the header bytes recovers
+  201 matches vs 130 for a strict `fa 01 39 07`), and CRLFs survive.
+  The byte clock is right — instead, **bit 6 (B6)** flips
+  intermittently. A byte's bits are numbered 0..7 LSB-first, so B6
+  is the seventh. B6 is set on `0x2X/0x3X` data (`+`→`k`, digit→
+  lowercase) and cleared on `0xFA`→`0xBA`, so XOR `0x40` recovers
+  valid bytes, but over a ~110 B frame every CRC / checksum trips
+  and 0 parse. The "full ~269 kbit/s, none parsed" case. Not a
+  shifted/misaligned window (an earlier guess) — the divisor applied
+  correctly.
 - **Low / stale divisor** (`test-data/zero-parse/stale-fail.bin`) —
   ~2.2 KB read, no structure (1 `0xFA`, 3 `$` in the file): the
   921600 open kept the stale 115200 divisor and undersampled the
@@ -375,21 +385,25 @@ preceded by a 115200 flip) plus `repro.sh`, the script that
 demonstrates it.
 
 It is host-side, not the device: the stream is continuous, only
-some opens fail, and a re-open clears it. We think the RPi5 PL011
-does not reliably apply the new baud divisor on a fresh open when
-the requested baud differs from the previous open's — sometimes
-leaving it stale (low), sometimes locking it bit-misaligned
-(full-misframe). This is why the old configure/measure bench was
-immune: its pre-measure `transact_retry` was a write→read that
-forced the divisor to settle (or failed loudly). The passive bench
-reads cold.
+some opens fail, and a re-open clears it. The two modes differ,
+though. The **low** case is a genuine divisor failure — the open
+keeps the stale 115200 divisor, an 8× error that breaks framing.
+The **misframe** case is not — framing is intact and the byte clock
+is right, only B6 flips. We think both stem from a marginal
+high-baud open (the low case a wholly-unapplied divisor, the
+misframe case a sampling / signal-integrity glitch below the byte
+layer), but the **B6 specificity is unexplained** — a baud/clock
+error would smear across adjacent bits and break framing, which it
+does not. This is why the old configure/measure bench was immune:
+its pre-measure `transact_retry` was a write→read that forced a
+clean lock (or failed loudly). The passive bench reads cold.
 
 Re-confirmed from cold: with the VN-100 power-cycled to flash
 defaults, `repro.sh` (default `START_BAUD=115200`) failed 2/20 (both
-full-misframe), so the symptom is not an artifact of session state.
-A config-phase `$VNERR 0x05` (not enough parameters) appeared on
-that run too — we think the same misalignment can also garble an
-*outgoing* command (TX side), not just passive reads, though that is
+B6-flip), so the symptom is not an artifact of session state. A
+config-phase `$VNERR 0x05` (not enough parameters) appeared on that
+run too — we think the same corruption can also garble an *outgoing*
+command (TX side), not just passive reads, though that is
 unconfirmed.
 
 Fix direction (the remaining Todo):
@@ -399,8 +413,9 @@ Fix direction (the remaining Todo):
   reopens the port, since a re-open clears it. Cheap, and matches
   the observed recovery.
 - **Re-assert the baud after open** — force the termios divisor
-  before reading (a second `set_baud_rate` / `tcsetattr`), so a
-  cold open can't keep a stale or misaligned divisor.
+  before reading (a second `set_baud_rate` / `tcsetattr`), so a cold
+  open can't keep a stale divisor. This addresses the low case; the
+  B6-flip case still needs reopen-on-bad-open.
 
 
 ## fix: binary output targets the wrong VN-100 serial port on TTL

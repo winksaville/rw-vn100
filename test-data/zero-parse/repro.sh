@@ -5,13 +5,14 @@
 # open").
 #
 # Mechanism: on the RPi5 PL011 UART, a fresh open whose baud differs
-# from the previous open does not always apply the new divisor —
-# sometimes it stays stale (undersampled garbage), sometimes it locks
-# bit-misaligned (full byte count, every CRC fails). So after putting
-# the device on 921600, we make every measured open a baud *change*:
-# a wrong-baud `--baud 115200` open immediately before each captured
-# `--baud 921600` read. ~20% of those opens fail; the device never
-# changes and the next open always parses clean.
+# from the previous open corrupts the read two ways — sometimes the
+# new divisor never applies (stale, undersampled garbage), sometimes
+# framing stays intact but bit 6 (B6) flips on scattered bytes so
+# every CRC fails. So after putting the device on 921600, we make
+# every measured open a baud *change*: a wrong-baud `--baud 115200`
+# open immediately before each captured `--baud 921600` read. ~20%
+# of those opens fail, the device never changes, and the next open
+# always parses clean.
 #
 # This script configures the device itself (volatile — a power cycle
 # reverts to the flash 115200) and leaves it on 921600 + a heavy

@@ -81,11 +81,12 @@ Design + module layout in chores-01 [[5]].
 1. Fix passive `bench` intermittent zero-parse — bytes read off the
    wire but zero parsed (`ASCII: none / Binary: none`). Root cause
    confirmed 2026-06-28 (detail + captures in chores-01 [[8]]):
-   the RPi5 PL011 doesn't reliably apply the new baud divisor on a
-   fresh open when the open baud differs from the previous open, so
-   a cold 921600-after-115200 open intermittently reads either
-   stale-divisor (undersampled, ~24 kbit/s) or bit-misaligned (full
-   byte count, every CRC fails). Host-side, not the device (a
+   a marginal 921600-after-115200 open (open baud differs from the
+   previous open) intermittently corrupts the read in one of two
+   modes — stale-divisor (the new divisor never applied, an 8×
+   undersample, ~24 kbit/s) or B6-flip (framing intact, byte clock
+   right, but bit 6 flips on scattered bytes so every CRC fails —
+   not a shifted window). Host-side, not the device (a
    re-open clears it). Reproduced 4/20 warm and 2/20 from a cold
    power-cycle by alternating `--baud`. Evidence + `repro.sh` in
    `test-data/zero-parse/`. The fix: reopen-on-bad-open (measure

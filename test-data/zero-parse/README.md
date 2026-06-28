@@ -6,10 +6,12 @@ a full byte read off the wire that parses into zero messages/frames
 [chores-01](../../notes/chores/chores-01.md) "Zero-parse root cause:
 PL011 baud-change open". Tracked as Todo #1.
 
-We think the RPi5 PL011 UART does not reliably apply the new baud
-divisor on a fresh open when the open baud differs from the previous
-open — sometimes it stays stale (undersampled), sometimes it locks
-bit-misaligned (full byte count, every CRC fails).
+A fresh open whose baud differs from the previous open intermittently
+corrupts the read in two modes: the new divisor never applies (stale,
+undersampled garbage), or — framing intact and the byte clock right —
+bit 6 (B6) flips on scattered bytes so every CRC fails (bits are
+numbered 0..7 LSB-first, so B6 is the seventh). We think both are a
+marginal high-baud open. The B6 specificity is unexplained.
 
 ## `repro.sh`
 
@@ -25,9 +27,11 @@ Raw `bench --capture` dumps — the bytes the scanner saw. Diff a
 `*-fail` against its `*-before` / `*-after` (or the clean
 `../both-streams.bin`, same 7-field + YMR config).
 
-- `misframe-{before,fail,after}.bin` — full-misframe mode: the
-  `-fail` is ~26.9 KB, frame-shaped but every CRC fails (full
-  ~269 kbit/s, none parsed); before/after parse clean.
+- `misframe-{before,fail,after}.bin` — B6-flip mode ("misframe" is a
+  misnomer — framing is intact): the `-fail` is ~26.9 KB with all
+  frames present but bit 6 flipped on scattered bytes, so every CRC
+  fails (full ~269 kbit/s, none parsed). The before/after parse
+  clean.
 - `stale-{before,fail,after}.bin` — stale-divisor mode: the `-fail`
   is ~2.2 KB, undersampled garbage (~24 kbit/s); before/after clean.
 - `cold-misframe-{1,2}.bin` — the two failures from the cold-start
@@ -38,8 +42,8 @@ Raw `bench --capture` dumps — the bytes the scanner saw. Diff a
 - **Warm** (continuously-powered device), `repro.sh` alternating
   `--baud`: 4/20 failed — 2 misframe, 2 stale (the triplets above).
 - **Cold** (VN-100 power-cycled to flash defaults), `repro.sh`
-  defaults (`START_BAUD=115200`): 2/20 failed (both full-misframe,
+  defaults (`START_BAUD=115200`): 2/20 failed (both B6-flip,
   `cold-misframe-{1,2}.bin`). Confirms it is not session state. A
-  config-phase `$VNERR 0x05` (not enough parameters) also appeared;
-  we think the same misalignment can garble an *outgoing* command
-  (TX side), not just passive reads — unconfirmed.
+  config-phase `$VNERR 0x05` (not enough parameters) also appeared.
+  We think the same corruption can garble an *outgoing* command (TX
+  side), not just passive reads — unconfirmed.
