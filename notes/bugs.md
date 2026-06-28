@@ -10,7 +10,7 @@ never reused or renumbered — so the heading doubles as a stable
 anchor (`#issue-N-…`) that todo / chores / commits can link to. The
 title may be reworded; the `issue-N` prefix of the anchor stays put.
 
-Next Issue #: 3
+Next Issue #: 4
 
 ## Bugs
 
@@ -112,6 +112,55 @@ is the prefix-based line-acceptance test.
 core of every command's reply path, so the confusion tax is paid by
 anyone tracing how `GetHZ` (or any transact) reads a reply.
 
+### Issue #3 — high-baud baud-change open corrupts the passive read (PL011)
+
+Passive `bench` intermittently reads bytes off the wire but parses
+**zero** of them — "zero-parse" (`ASCII: none / Binary: none`) —
+then works on a re-run. The device streams continuously throughout —
+only the host's port open is at fault. It strikes a fresh open whose
+baud **differs from the previous open's** (the first/rare open at a
+new high baud) on the RPi5 TTL header (`/dev/ttyAMA0`, PL011). Full
+analysis + byte evidence: chores-01 [[2]].
+
+Two modes, both on a baud-change open:
+
+- **Stale-divisor (low).** The new divisor never applies — the port
+  keeps the previous baud (a 921600 open stuck at 115200), so it
+  undersamples the stream 8×: ~2.2 KB of structureless garbage
+  (~24 kbit/s). Framing broken.
+- **B6-flip** ("full-misframe" in the captures, but a misnomer —
+  framing is intact). The divisor *does* apply: all frames present,
+  full byte count. But **bit 6 (B6)** flips on scattered bytes (set
+  on `0x2X/0x3X` data, cleared on `0xFA`), so every CRC / checksum
+  fails. XOR `0x40` recovers valid bytes. Why specifically B6 is
+  unexplained.
+
+Host-side, below the application — the tool does not transform the
+bytes. We think both are a marginal high-baud open at the UART layer.
+Reproduced 4/20 (warm) and 2/20 (cold VN-100 power-cycle) by
+alternating the open baud — captures + `repro.sh` in
+`test-data/zero-parse/`. The fix is tracked in `notes/todo.md`.
+
+Sibling to **Issue #1** (same family — high-baud fresh opens on the
+rpi5) but a distinct failure: #1 wedges the *device* (silent, needs a
+power cycle) on the RS-232 rig, while this corrupts the *host* read on
+TTL and a re-open recovers.
+
+**Work-around, not a fix.** The cause is in the host PL011 and not
+addressable from the tool, so we paper over it: detect a bad open
+(0 parses early) and **reopen-and-retry until a clean read, bounded
+N**, erroring if exhausted. One reopen is not enough — it can itself
+be a risky baud-change (~20%), notably in the stale case. Same-baud
+reopens are reliable. Neither this nor a forced termios baud re-apply
+addresses *why* the PL011 mis-applies the divisor.
+
+**Cost / why it matters:** a passive read silently reports "nothing
+streaming" while the device streams fine, so any consumer (a flight
+loop sampling the IMU across a baud change) sees a spurious dropout
+unless it retries. Recoverable — unlike Issue #1's unrecoverable
+wedge — but it must be handled, not ignored.
+
 # References
 
 [1]: chores/chores-01.md#rs-232-link-analysis
+[2]: chores/chores-01.md#zero-parse-root-cause-pl011-baud-change-open-confirmed-2026-06-28

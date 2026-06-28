@@ -359,8 +359,8 @@ flag (the AM `RWVN100_DUMP` idea, landed as `bench --capture
 <path>`). The recipe makes every measured open a baud *change*:
 alternate a `bench --baud 115200` (wrong baud — device at 921600)
 immediately before each `bench --baud 921600`. 4 of 20 such opens
-failed (20%); the streaming device never changed, and the next
-open always parsed clean.
+failed (20%). The streaming device never changed, and the next open
+always parsed clean. Registered as Bug #3.
 
 - **Full-misframe** (`test-data/zero-parse/misframe-fail.bin`) —
   "misframe" is a misnomer: framing is **intact**. All ~200 frames
@@ -408,10 +408,12 @@ unconfirmed.
 
 Fix direction (the remaining Todo):
 
-- **Reopen-on-bad-open** — `measure` detects 0 valid frames/lines
-  (or throughput far below the link) in an early window and
-  reopens the port, since a re-open clears it. Cheap, and matches
-  the observed recovery.
+- **Reopen-and-retry** (a work-around — the PL011 cause is below the
+  tool) — `measure` detects a bad open (0 parses in an early window)
+  and reopens, looping until a clean read (bounded N, error if
+  exhausted). One reopen is not enough: it can itself be a risky
+  baud-change (~20%), notably in the stale case. Same-baud reopens
+  are reliable (40/40), so the B6 case usually clears in one.
 - **Re-assert the baud after open** — force the termios divisor
   before reading (a second `set_baud_rate` / `tcsetattr`), so a cold
   open can't keep a stale divisor. This addresses the low case; the
