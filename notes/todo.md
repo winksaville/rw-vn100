@@ -51,7 +51,8 @@ Design + module layout in chores-01 [[5]].
      (CRC-checked) + total wire throughput. Resolves the passive
      binary-rate open question [[1]] (0xFA sniff). Lands in
      `bench.rs`. Now exercisable via the -4 verbs (`set-bin`
-     then `bench`).
+     then `bench`). (done — impl landed; an intermittent
+     cold-open 0/0 remains, tracked as Todo #1)
    - 0.3.0-6 step grammar + one connection: shell-word steps,
      `+` token join, single port open, left-to-right execution,
      merge `set-bin`+`set-bin-hz` in one word into a single reg-75
@@ -77,6 +78,14 @@ Design + module layout in chores-01 [[5]].
  detail goes in `notes/chores/chores-NN.md` design
  subsections (link via `[N]` ref).
 
+1. Fix passive `bench` intermittent zero-parse: it sometimes
+   reports `ASCII: none / Binary: none` then works on a re-run.
+   The symptom varies — full ~269 kbit/s in some failures, a low
+   ~24 kbit/s in another — so start by checking device state
+   (`get-bin` / `get-ascii` / `rrg 5`), then capture a real
+   failure via an env-gated raw dump and diff against the clean
+   `test-data/both-streams.bin`. [[8]]
+
 ## Done
 
 Completed tasks are moved from `## Todo` to here, `## Done`, as they are completed
@@ -85,6 +94,7 @@ and older `## Done` sections are moved to [done.md](done.md) to keep this file s
 - feat: default RPi5 UART, fix binary port on TTL [[2]],[[3]]
 - fix: bench silences async before binary config [[4]]
 - feat: decompose output config into register verbs [[6]]
+- feat: passive bench measures the live stream [[7]]
 
 # References
 
@@ -94,3 +104,5 @@ and older `## Done` sections are moved to [done.md](done.md) to keep this file s
 [4]: chores/chores-01.md#fix-bench-silences-async-before-binary-config
 [5]: chores/chores-01.md#refactor-split-mainrs-into-lib-modules
 [6]: chores/chores-01.md#feat-decompose-output-config-into-register-verbs
+[7]: chores/chores-01.md#feat-passive-bench-measures-the-live-stream
+[8]: chores/chores-01.md#intermittent-zero-parse-open

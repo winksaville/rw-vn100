@@ -79,14 +79,6 @@ pub fn parse_fields(list: &str) -> Result<Vec<&'static Field>, String> {
     Ok(out)
 }
 
-/// Default binary field set: timestamp + acceleration.
-pub fn default_fields() -> Vec<&'static Field> {
-    vec![
-        lookup_field("time").unwrap(),
-        lookup_field("accel").unwrap(),
-    ]
-}
-
 /// The known Common-group fields selected by `mask`, ordered by bit — the same
 /// order the device emits them (`FIELDS` is bit-ordered, so a filter preserves
 /// it).

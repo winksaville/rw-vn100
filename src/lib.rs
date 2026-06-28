@@ -17,8 +17,8 @@
 //!   set-bin-hz            write the binary rate (reg-75 divisor, 800/hz)
 //!   baud                  change the serial baud rate          (register 5)
 //!   rrg / wrg             generic read/write of any register   ($VNRRG / $VNWRG)
-//!   bench                 (legacy) configure an output and measure the achieved
-//!                         rate; superseded by passive bench in a later step
+//!   bench                 passively measure the live stream — ASCII line rate,
+//!                         binary frame rate, and wire throughput (no writes)
 //!   reset / factory-reset reboot / restore defaults            ($VNRST / $VNRFS)
 //!
 //! Key VN messages:
@@ -379,19 +379,8 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             print_reg_fields(&reply);
         }
 
-        Command::Bench {
-            binary,
-            hz,
-            secs,
-            fields,
-            serial_port,
-            ascii_type,
-        } => {
-            if binary {
-                bench_binary(&mut port, config.baud, hz, secs, &fields, serial_port)?;
-            } else {
-                bench_ascii(&mut port, config.baud, hz, secs, ascii_type)?;
-            }
+        Command::Bench { secs } => {
+            bench(&mut port, config.baud, secs)?;
         }
 
         Command::FactoryReset => {

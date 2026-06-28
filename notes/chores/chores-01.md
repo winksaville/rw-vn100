@@ -206,7 +206,7 @@ key. Three verbs, three distinct jobs:
 
 ## refactor: split main.rs into lib modules
 
-Commits: [[7]],[[8]]
+Commits: [[7]],[[8]],[[10]]
 
 `main.rs` had grown to ~1890 lines, and the 0.3.0 bench redesign
 adds a large new surface (the `get-*`/`set-*` verbs, the `+`-step
@@ -232,7 +232,7 @@ tests + clippy + a smoke run.
 
 ## feat: decompose output config into register verbs
 
-Commits:
+Commits: [[11]]
 
 The old one-shot `bench --bin …` was the only convenient way to
 configure an output, coupling measurement to a
@@ -264,6 +264,89 @@ verb set and rationale are in the cycle design above
   until passive bench (-5) replaces it.
 - On a parse error the CLI now prints just the error plus a `--help`
   pointer — the full help dump scrolled the error off a small screen.
+
+
+## feat: passive bench measures the live stream
+
+Commits:
+
+`bench [SECS]` is now purely passive: it opens the port, reads the
+live stream for `SECS` (default 5), and reports — no device writes,
+no configure/measure/restore. It scans the same bytes two ways at
+once — ASCII `$VN…` async lines (checksum-valid) and binary `0xFA`
+Common-group frames (CRC-valid) — plus total wire throughput. This
+removes bench's only wedge surface and lets either or both streams
+be measured as they actually run.
+
+- Binary is passive: the frame length is **sniffed** from each
+  frame's own header (groups `0x01`, the 16-bit Common mask) and
+  confirmed by CRC, rather than computed from a config. Resolves
+  the `0xFA`-sniff open question [[1]].
+- Drops the configure/measure/restore `bench`, its `--bin` /
+  `--hz` / `--fields` / `--serial-port` / `--type` flags, the
+  serial-port parser, and `default_fields`. The decomposed verbs
+  (-4) are how you configure now.
+- The `uncomp_accel` / `uncomp_gyro` sample fields gained their
+  units (`m/s^2`, `rad/s`) — the original prompt for this work.
+- Real device captures are committed under `test-data/` as test
+  fixtures; a test parses `both-streams.bin` at every read-chunk
+  size. See [test-data/README.md](/test-data/README.md).
+
+### Intermittent zero-parse (open)
+
+Passive `bench` intermittently reports `ASCII: none / Binary:
+none` then works on a re-run. **The symptom varies, so there may
+be more than one cause** — captured here so AM work starts from
+evidence, not a single theory. Tracked as a Todo.
+
+- **Full-throughput failures.** Twice (session start; a user run)
+  it reported 0/0 at the *full* ~269 kbit/s — every byte read,
+  none parsed.
+- **Low-throughput failure.** Once it reported 0/0 at only
+  ~24 kbit/s (≈2.4 KB/s) — at both `--baud 115200` and a following
+  `--baud 921600` — and then a second identical `--baud 921600`
+  re-run immediately returned to the full ~268 kbit/s and parsed
+  fine. The low run came right after a *wrong-baud* (115200) open.
+  We think a 921600 open immediately following a 115200 open does
+  not always apply the new baud (PL011 divisor), so the 921600
+  stream is read at the stale rate — low effective byte rate, all
+  misframed — which the next open clears. This is a port-open /
+  baud-sync issue, not the device changing state.
+
+Ruled out for the **full-throughput** case:
+
+- The parser — it counts the real captured streams correctly at
+  every read-chunk size (`test-data/both-streams.bin`, test
+  `measure_parses_real_both_streams_capture`).
+- Byte loss / UART overrun — those failures show *full*
+  throughput, and dmesg logs no overrun.
+- Line-discipline corruption — the tty is in raw mode
+  (`-icrnl -istrip …`).
+- Idle backlog — a 60 s flooded-idle then bench parsed fine.
+- A 115200→921600 transition — a wrong-baud open then a 921600
+  bench parsed fine.
+
+For the full-throughput case we *think* the port may come up
+**bit-misaligned** on some cold opens (the baud not fully applied),
+so the window is shifted garbage — full count, wrong values — which
+re-opening clears; and that the old configure/measure `bench` was
+shielded by its pre-measure `transact_retry` (which primed the port
+and would fail loudly on a bad baud) while the passive bench reads
+cold. This does **not** explain the low-throughput failure.
+
+Next steps (AM):
+
+- **First, check the device** — `get-bin` / `get-ascii` / `rrg 7`
+  / `rrg 5` (baud). The low-throughput failure suggests the device
+  may have reset or drifted; rule that out before blaming the host.
+- Add an env-gated raw dump (`RWVN100_DUMP=<file>`) to `measure`,
+  capture a real failure, and diff it against the clean
+  `both-streams.bin` — bit-shifted ⇒ a port-open / baud-sync fix
+  (e.g. a verify-sync transact before measuring); clean ⇒ reopen
+  the parser question.
+- Replace the circular synthetic interleave tests with
+  real-fixture tests, and split `measure` into a clock-free scanner
+  so the fixture tests run instantly.
 
 
 ## fix: binary output targets the wrong VN-100 serial port on TTL
@@ -432,7 +515,7 @@ The fix reorders `bench_binary`:
 
 ## Rename rdwr_vn100 to rw-vn100
 
-Commits: 
+Commits: [[12]]
 
 The renaming was because claude-code is converting the underscore to a
 a hypen so we endup with two ~/.claude/projects and claude isn't using
@@ -440,6 +523,26 @@ our symlink to our /.claude repo.
 
 So in our /.claude repo commit there are "new" .jsonl that were not
 previously added.
+
+
+## docs: fix ICD citations, add ARCHITECTURE.md
+
+Commits: [[13]]
+
+A verification pass against the VN-100 ICD and User Manual, with the
+device confirmed on firmware 3.1.0.0. The register / enum / table
+citations scattered through the code and REFERENCE.md were audited
+against the authoritative sections, and the transaction-model design
+was written up as its own document.
+
+- ARCHITECTURE.md is new — the module map plus the transaction-model
+  design: rw-vn100's transact-or-measure discard versus the vnsdk
+  Listening Thread ([[9]]).
+- Citations sharpened — framing to ICD §2.1.3 / §1.4.2-3, and the
+  `vn_crc16`, `error_description`, `VALID_RATES`, `VALID_BAUDS` cites
+  corrected to their real sections.
+- Firmware provenance recorded — device 3.1.0.0 is the ICD baseline,
+  with the User Manual's firmware-v1.1 caveat noted.
 
 # References
 
@@ -452,4 +555,8 @@ previously added.
 [7]: https://github.com/winksaville/rw-vn100/commit/cb3c720fefdf "cb3c720fefdf078c21475698c0675117588e988a"
 [8]: https://github.com/winksaville/rw-vn100/commit/3e2c4983c744 "3e2c4983c744762a72dcfd4e3b670c6b0dc9e079"
 [9]: /ARCHITECTURE.md#transaction-model-rw-vn100-discard-vs-the-vnsdk-listening-thread
+[10]: https://github.com/winksaville/rw-vn100/commit/b8a24bbec5b8 "b8a24bbec5b8ce57fb622bfe8f2037a237b53f37"
+[11]: https://github.com/winksaville/rw-vn100/commit/02b39b39b061 "02b39b39b061c3b5a304c9162cfb675a12b0cf89"
+[12]: https://github.com/winksaville/rw-vn100/commit/c18ee71941b2 "c18ee71941b244a9f0e75ad5f328bc278ea3b721"
+[13]: https://github.com/winksaville/rw-vn100/commit/7fd38e84f7b6 "7fd38e84f7b675dbc04ce4e213a37c46763601f5"
 
